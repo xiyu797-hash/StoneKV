@@ -1,0 +1,88 @@
+COMMAND: ctest --test-dir /tmp/stonekv_compact_red_20261115 --repeat until-fail:10 --output-on-failure
+Internal ctest changing into directory: /tmp/stonekv_compact_red_20261115
+Test project /tmp/stonekv_compact_red_20261115
+    Start 1: stonekv_core
+    Test #1: stonekv_core .....................   Passed    1.94 sec
+    Start 1: stonekv_core
+    Test #1: stonekv_core .....................   Passed    1.92 sec
+    Start 1: stonekv_core
+    Test #1: stonekv_core .....................   Passed    1.89 sec
+    Start 1: stonekv_core
+    Test #1: stonekv_core .....................   Passed    1.87 sec
+    Start 1: stonekv_core
+    Test #1: stonekv_core .....................   Passed    1.90 sec
+    Start 1: stonekv_core
+    Test #1: stonekv_core .....................   Passed    2.30 sec
+    Start 1: stonekv_core
+    Test #1: stonekv_core .....................   Passed    1.91 sec
+    Start 1: stonekv_core
+    Test #1: stonekv_core .....................   Passed    1.91 sec
+    Start 1: stonekv_core
+    Test #1: stonekv_core .....................   Passed    1.89 sec
+    Start 1: stonekv_core
+1/4 Test #1: stonekv_core .....................   Passed    1.88 sec
+    Start 2: stonekv_io_faults
+    Test #2: stonekv_io_faults ................   Passed    0.35 sec
+    Start 2: stonekv_io_faults
+    Test #2: stonekv_io_faults ................   Passed    0.35 sec
+    Start 2: stonekv_io_faults
+    Test #2: stonekv_io_faults ................   Passed    0.35 sec
+    Start 2: stonekv_io_faults
+    Test #2: stonekv_io_faults ................   Passed    0.34 sec
+    Start 2: stonekv_io_faults
+    Test #2: stonekv_io_faults ................   Passed    0.35 sec
+    Start 2: stonekv_io_faults
+    Test #2: stonekv_io_faults ................   Passed    0.34 sec
+    Start 2: stonekv_io_faults
+    Test #2: stonekv_io_faults ................   Passed    0.35 sec
+    Start 2: stonekv_io_faults
+    Test #2: stonekv_io_faults ................   Passed    0.35 sec
+    Start 2: stonekv_io_faults
+    Test #2: stonekv_io_faults ................   Passed    0.35 sec
+    Start 2: stonekv_io_faults
+2/4 Test #2: stonekv_io_faults ................   Passed    0.35 sec
+    Start 3: stonekv_background_flush
+    Test #3: stonekv_background_flush .........   Passed    0.30 sec
+    Start 3: stonekv_background_flush
+    Test #3: stonekv_background_flush .........   Passed    0.31 sec
+    Start 3: stonekv_background_flush
+    Test #3: stonekv_background_flush .........   Passed    0.31 sec
+    Start 3: stonekv_background_flush
+    Test #3: stonekv_background_flush .........   Passed    0.30 sec
+    Start 3: stonekv_background_flush
+    Test #3: stonekv_background_flush .........   Passed    0.30 sec
+    Start 3: stonekv_background_flush
+    Test #3: stonekv_background_flush .........   Passed    0.30 sec
+    Start 3: stonekv_background_flush
+    Test #3: stonekv_background_flush .........   Passed    0.31 sec
+    Start 3: stonekv_background_flush
+    Test #3: stonekv_background_flush .........   Passed    0.31 sec
+    Start 3: stonekv_background_flush
+    Test #3: stonekv_background_flush .........   Passed    0.31 sec
+    Start 3: stonekv_background_flush
+3/4 Test #3: stonekv_background_flush .........   Passed    0.30 sec
+    Start 4: stonekv_background_compaction
+    Test #4: stonekv_background_compaction ....   Passed    0.09 sec
+    Start 4: stonekv_background_compaction
+    Test #4: stonekv_background_compaction ....   Passed    0.09 sec
+    Start 4: stonekv_background_compaction
+    Test #4: stonekv_background_compaction ....   Passed    0.09 sec
+    Start 4: stonekv_background_compaction
+    Test #4: stonekv_background_compaction ....   Passed    0.09 sec
+    Start 4: stonekv_background_compaction
+    Test #4: stonekv_background_compaction ....   Passed    0.09 sec
+    Start 4: stonekv_background_compaction
+    Test #4: stonekv_background_compaction ....   Passed    0.55 sec
+    Start 4: stonekv_background_compaction
+    Test #4: stonekv_background_compaction ....   Passed    0.09 sec
+    Start 4: stonekv_background_compaction
+    Test #4: stonekv_background_compaction ....   Passed    0.09 sec
+    Start 4: stonekv_background_compaction
+    Test #4: stonekv_background_compaction ....   Passed    0.09 sec
+    Start 4: stonekv_background_compaction
+4/4 Test #4: stonekv_background_compaction ....   Passed    0.09 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =  27.28 sec
+EXIT_CODE=0

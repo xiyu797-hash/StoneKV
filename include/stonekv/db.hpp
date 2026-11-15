@@ -36,6 +36,11 @@ struct Stats {
     std::size_t memtable_bytes = 0;
     std::size_t sstable_count = 0;
     std::uint64_t wal_bytes = 0;
+    // Per-process successful full compactions since this DB instance opened.
+    std::uint64_t compaction_count = 0;
+    std::uint64_t compaction_micros = 0;
+    std::uint64_t compaction_output_bytes = 0;
+    std::size_t background_tasks = 0;
 };
 
 class DB final {
@@ -63,7 +68,9 @@ public:
     // durability boundary for sync_writes=false mode. Background I/O failures
     // poison the instance; close and reopen after investigating the error.
     void Flush();
-    void Compact();  // synchronous full compaction (all current SSTables)
+    // Wait for a full compaction submitted to the background worker. Other
+    // clients may continue reads and writes while the merged SST is built.
+    void Compact();
     Stats GetStats() const;
 
 private:

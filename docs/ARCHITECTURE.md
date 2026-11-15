@@ -2,7 +2,7 @@
 
 ## 数据路径
 
-下图为原同步实现的历史示意。当前 Flush 使用有界 immutable + 后台工作线程；精确锁与 WAL 回收语义见 [BACKGROUND_FLUSH.md](BACKGROUND_FLUSH.md)。Compaction 仍同步。
+下图为原同步实现的历史示意。当前 Flush 使用有界 immutable + 后台工作线程；精确锁与 WAL 回收语义见 [BACKGROUND_FLUSH.md](BACKGROUND_FLUSH.md)。Compaction 由单一后台工作线程执行，读取与新写入可在合并 SST 构建期间继续；显式 Compact 等待该任务结束。
 
 ```text
               Put / Delete (单进程 DB::mutex)

@@ -4,6 +4,7 @@
 #include <array>
 #include <cerrno>
 #include <condition_variable>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -405,7 +406,7 @@ struct DB::Impl {
     FD lock_fd;
     FD wal_fd;
     mutable std::mutex mutex;
-    std::condition_variable cv;
+    mutable std::condition_variable cv;
     Manifest manifest;
     std::uint64_t latest_seq{0};
     bool poisoned{false}; // 出现 I/O 提交异常后拒绝继续操作，避免重复序号或状态分叉
@@ -416,6 +417,10 @@ struct DB::Impl {
     std::size_t immutable_bytes{0};
     bool barrier{false};
     bool shutdown{false};
+    bool compaction_pending{false};
+    std::uint64_t compaction_count{0};
+    std::uint64_t compaction_micros{0};
+    std::uint64_t compaction_output_bytes{0};
     std::string background_error;
     std::thread flush_worker;
     std::vector<SSTable> tables;
@@ -492,8 +497,22 @@ struct DB::Impl {
     void backgroundLoop() noexcept {
         std::unique_lock<std::mutex> lock(mutex);
         for (;;) {
-            cv.wait(lock, [this] { return shutdown || poisoned || bool(immutable); });
-            if (poisoned || (!immutable && shutdown)) return;
+            cv.wait(lock, [this] { return shutdown || poisoned || bool(immutable) || compaction_pending; });
+            if (poisoned || (!immutable && !compaction_pending && shutdown)) return;
+            if (compaction_pending) {
+                try {
+                    compactWorker(lock);
+                    compaction_pending = false;
+                    cv.notify_all();
+                } catch (const std::exception& e) {
+                    if (!lock.owns_lock()) lock.lock();
+                    poisoned = true; background_error = e.what(); cv.notify_all(); return;
+                } catch (...) {
+                    if (!lock.owns_lock()) lock.lock();
+                    poisoned = true; background_error = "unknown background compaction failure"; cv.notify_all(); return;
+                }
+                continue;
+            }
             const auto id = manifest.next_id;
             const auto seq = immutable_seq;
             try {
@@ -523,7 +542,7 @@ struct DB::Impl {
                     if (::lseek(wal_fd.fd, 0, SEEK_END) < 0) fail(err("reset WAL position"));
                     maybeCrash("after_wal_truncate");
                 }
-                if (tables.size() >= opt.compaction_trigger) compactLocked();
+                if (tables.size() >= opt.compaction_trigger) compaction_pending = true;
                 if (!barrier && !shutdown && mem_bytes >= opt.memtable_max_bytes) freezeLocked();
                 cv.notify_all();
             } catch (const std::exception& e) {
@@ -728,10 +747,14 @@ struct DB::Impl {
         }
         return std::nullopt;
     }
-    void compactLocked() {
+    // Only the worker changes tables and manifest. While it builds the merged
+    // SST without the mutex, readers can safely use the unchanged old tables.
+    void compactWorker(std::unique_lock<std::mutex>& lock) {
         if (tables.size() < 2) return;
         const auto id = manifest.next_id;
         if (id == std::numeric_limits<std::uint64_t>::max()) fail("SST file id exhausted");
+        const auto started = std::chrono::steady_clock::now();
+        lock.unlock();
         SSTWriter writer(dir / sstFilename(id));
         // Reuse one read descriptor per source SST during this compaction.
         // Opening a file for every key creates O(records) extra open/close syscalls.
@@ -768,6 +791,11 @@ struct DB::Impl {
         writer.Finish();
         maybeCrash("after_compaction_sst_rename");
         SSTable compacted = loadSST(dir / sstFilename(id), id);
+        std::error_code size_error;
+        const auto output_bytes = fs::file_size(dir / sstFilename(id), size_error);
+        if (size_error) fail("cannot stat compacted SST: " + size_error.message());
+        lock.lock();
+        if (poisoned) return;
         Manifest updated = manifest;
         updated.files = {id};
         updated.next_id = id + 1;
@@ -785,6 +813,10 @@ struct DB::Impl {
             if (ec) fail("failed deleting obsolete SST: " + ec.message());
         }
         syncDir(dir);
+        ++compaction_count;
+        compaction_output_bytes += output_bytes;
+        compaction_micros += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count());
     }
     void flush() {
         std::unique_lock<std::mutex> lock(mutex);
@@ -804,14 +836,22 @@ struct DB::Impl {
             freezeLocked();
             cv.wait(lock, [this] { return poisoned || !immutable; });
             if (poisoned) fail("background flush failed: " + background_error);
-            if (compact_after) compactLocked();
-            barrier = false; cv.notify_all();
+            if (compact_after) {
+                compaction_pending = true;
+                barrier = false; cv.notify_all();
+                cv.wait(lock, [this] { return poisoned || !compaction_pending; });
+                if (poisoned) fail("background compaction failed: " + background_error);
+            } else { barrier = false; cv.notify_all(); }
         } catch (...) { poisoned = true; barrier = false; cv.notify_all(); throw; }
     }
     Stats stats() const {
-        std::lock_guard<std::mutex> lock(mutex);
+        std::unique_lock<std::mutex> lock(mutex);
+        // Preserve the API's historical threshold observation: when an
+        // automatic full compaction is due, report after it has settled.
+        cv.wait(lock, [this] { return poisoned || !compaction_pending || tables.size() < opt.compaction_trigger; });
         return {latest_seq, manifest.durable_seq, mem.size() + (immutable ? immutable->size() : 0),
-                mem_bytes + immutable_bytes, tables.size(), fileSize(wal_fd.fd)};
+                mem_bytes + immutable_bytes, tables.size(), fileSize(wal_fd.fd), compaction_count,
+                compaction_micros, compaction_output_bytes, static_cast<std::size_t>(bool(immutable)) + static_cast<std::size_t>(compaction_pending)};
     }
     std::vector<std::pair<std::string, std::string>> scan(
         const std::string& begin, const std::string& end, std::size_t limit) const {

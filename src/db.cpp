@@ -46,6 +46,9 @@ constexpr std::size_t kMaxBatchOperations = 4096;
 constexpr std::size_t kMaxBatchBytes = 32U * 1024U * 1024U;
 constexpr std::size_t kSstHead = 21; // seq8 kind1 keylen4 vallen4 crc4
 constexpr const char* kSstMagic = "STONEKV1"; // 8 bytes
+constexpr const char* kSstBlockMagic = "STONEKV2";
+constexpr std::size_t kSstBlockTarget = 64U * 1024U;
+constexpr std::size_t kSstBlockMax = kMaxValue + kMaxKey + kSstHead;
 constexpr const char* kManifestMagic = "STONEKV_MANIFEST_V1";
 constexpr std::uint8_t kPut = 1;
 constexpr std::uint8_t kDelete = 2;
@@ -237,7 +240,7 @@ public:
         : final_(final_path), temp_(final_path.string() + ".tmp"),
           out_(::open(temp_.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644)) {
         if (out_.fd < 0) fail(err("create SST"));
-        std::string head(kSstMagic, 8);
+        std::string head(kSstBlockMagic, 8);
         put64(head, 0);
         writeAll(out_.fd, head.data(), head.size());
     }
@@ -251,13 +254,16 @@ public:
         put32(head, static_cast<std::uint32_t>(r.value.size()));
         const std::uint32_t crc = crcParts(head.data(), head.size(), key, r.value);
         put32(head, crc);
-        writeAll(out_.fd, head.data(), head.size());
-        writeAll(out_.fd, key.data(), key.size());
-        writeAll(out_.fd, r.value.data(), r.value.size());
+        const auto record_size = head.size() + key.size() + r.value.size();
+        if (!block_.empty() && block_.size() + record_size > kSstBlockTarget) flushBlock();
+        block_ += head;
+        block_ += key;
+        block_ += r.value;
         ++count_;
         prev_ = key;
     }
     void Finish() {
+        flushBlock();
         std::string count;
         put64(count, count_);
         pwriteAll(out_.fd, count.data(), count.size(), 8);
@@ -270,9 +276,19 @@ public:
     }
     ~SSTWriter() { if (!finished_) { std::error_code ec; fs::remove(temp_, ec); } }
 private:
+    void flushBlock() {
+        if (block_.empty()) return;
+        std::string header;
+        put32(header, static_cast<std::uint32_t>(block_.size()));
+        put32(header, crc32(block_));
+        writeAll(out_.fd, header.data(), header.size());
+        writeAll(out_.fd, block_.data(), block_.size());
+        block_.clear();
+    }
     fs::path final_, temp_;
     FD out_;
     std::string prev_;
+    std::string block_;
     std::uint64_t count_{0};
     bool finished_{false};
 };
@@ -284,7 +300,8 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
     if (size < 16) fail("short SST: " + path.string());
     char head[16];
     preadAll(fd.fd, head, sizeof(head), 0);
-    if (std::memcmp(head, kSstMagic, 8) != 0) fail("invalid SST magic");
+    const bool block_format = std::memcmp(head, kSstBlockMagic, 8) == 0;
+    if (!block_format && std::memcmp(head, kSstMagic, 8) != 0) fail("invalid SST magic or unsupported version");
     const auto count = get64(head + 8);
     if (count > (size - 16) / (kSstHead + 1)) fail("invalid SST count");
     SSTable table;
@@ -293,9 +310,22 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
     table.index.reserve(static_cast<std::size_t>(count));
     table.bloom.Initialize(static_cast<std::size_t>(count));
     std::uint64_t off = 16;
+    std::uint64_t block_end = off;
     std::string prev;
     for (std::uint64_t i = 0; i < count; ++i) {
-        if (off > size || size - off < kSstHead) fail("truncated SST record header");
+        if (block_format && off == block_end) {
+            if (off > size || size - off < 8) fail("truncated SST block header");
+            char bh[8]; preadAll(fd.fd, bh, sizeof(bh), off);
+            const auto bytes = get32(bh);
+            if (bytes == 0 || bytes > kSstBlockMax || size - off - 8 < bytes) fail("invalid SST block length");
+            std::string block(bytes, '\0');
+            preadAll(fd.fd, block.data(), block.size(), off + 8);
+            if (crc32(block) != get32(bh + 4)) fail("SST block CRC mismatch");
+            off += 8;
+            block_end = off + bytes;
+        }
+        const auto limit = block_format ? block_end : size;
+        if (off > limit || limit - off < kSstHead) fail("truncated SST record header");
         char rh[kSstHead];
         preadAll(fd.fd, rh, sizeof(rh), off);
         const auto seq = get64(rh);
@@ -303,7 +333,7 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
         const auto klen = get32(rh + 9), vlen = get32(rh + 13);
         if (kind != kPut && kind != kDelete) fail("invalid SST operation");
         checkBounds(klen, vlen);
-        if (off + kSstHead > size || size - off - kSstHead < static_cast<std::uint64_t>(klen) + vlen)
+        if (limit - off - kSstHead < static_cast<std::uint64_t>(klen) + vlen)
             fail("truncated SST record payload");
         std::string key(klen, '\0'), value(vlen, '\0');
         preadAll(fd.fd, key.data(), key.size(), off + kSstHead);
@@ -315,7 +345,7 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
         prev = std::move(key);
         off += kSstHead + static_cast<std::uint64_t>(klen) + vlen;
     }
-    if (off != size) fail("unexpected trailing bytes in SST");
+    if (off != size || (block_format && off != block_end)) fail("unexpected trailing bytes in SST");
     return table;
 }
 Record readAt(const SSTable& table, const IndexEntry& item, int reader_fd = -1) {

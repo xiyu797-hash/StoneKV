@@ -169,6 +169,43 @@ void corruptSst() {
     }
     expectThrow([&]{ stonekv::DB bad(t.path.string()); }, "CRC-corrupt SST refused");
 }
+void blockSstFormatAndLegacyCompatibility() {
+    auto u32=[](std::string& s,std::uint32_t x){for(int i=0;i<4;++i)s.push_back(static_cast<char>((x>>(8*i))&255U));};
+    auto u64=[](std::string& s,std::uint64_t x){for(int i=0;i<8;++i)s.push_back(static_cast<char>((x>>(8*i))&255U));};
+    auto crc=[](const std::string& s){std::uint32_t x=0xffffffffU;for(unsigned char c:s){x^=c;for(int i=0;i<8;++i)x=(x>>1U)^((x&1U)?0xedb88320U:0U);}return ~x;};
+    Tmp t; {stonekv::DB db(t.path.string());}
+    std::string entry;u64(entry,1);entry.push_back(1);u32(entry,3);u32(entry,3);const auto checksum=crc(entry+"oldone");u32(entry,checksum);entry+="oldone";
+    std::string old("STONEKV1",8);u64(old,1);old+=entry;
+    {std::ofstream out(t.path/"SST-000000000001.sst",std::ios::binary);out.write(old.data(),static_cast<std::streamsize>(old.size()));require(bool(out),"write independent V1 SST");}
+    const std::string payload="STONEKV_MANIFEST_V1\n1 2 1\n1\n";
+    {std::ofstream out(t.path/"MANIFEST",std::ios::binary|std::ios::trunc);out<<payload<<"crc32 "<<std::hex<<std::setw(8)<<std::setfill('0')<<crc(payload)<<'\n';require(bool(out),"write V1 fixture manifest");}
+    {stonekv::DB db(t.path.string(),opt(1024*1024,100));require(db.Get("old")=="one","V1 table read");db.Put("new","two");db.Flush();}
+    {std::ifstream in(t.path/"SST-000000000002.sst",std::ios::binary);char magic[8]{};in.read(magic,8);require(in.gcount()==8 && std::string(magic,8)=="STONEKV2","new tables must use block V2 format");}
+    {stonekv::DB db(t.path.string(),opt(1024*1024,100));require(db.Get("old")=="one" && db.Get("new")=="two","mixed V1/V2 reopen");db.Compact();}
+    {stonekv::DB db(t.path.string());require(db.Get("old")=="one" && db.Get("new")=="two","mixed version compaction");}
+}
+void blockSstCorruptionAndBoundaries() {
+    for (int mode=0; mode<5; ++mode) {
+        Tmp t;
+        { stonekv::DB db(t.path.string(),opt(1024*1024,100));
+          for(int i=0;i<700;++i)db.Put("key-"+std::to_string(i),std::string(128,static_cast<char>('a'+i%26)));
+          db.Flush(); }
+        fs::path file;
+        for(const auto& e:fs::directory_iterator(t.path))if(e.path().extension()==".sst")file=e.path();
+        require(!file.empty(),"find V2 block SST");
+        int fd=::open(file.c_str(),O_RDWR);require(fd>=0,"open V2 SST");
+        unsigned char h[4]{};require(::pread(fd,h,4,16)==4,"read first block length");
+        const std::uint32_t len=std::uint32_t(h[0])|(std::uint32_t(h[1])<<8U)|(std::uint32_t(h[2])<<16U)|(std::uint32_t(h[3])<<24U);
+        require(len>0 && fs::file_size(file)>16+8+len,"fixture has multiple blocks");
+        if(mode==1){const char zero[4]={};require(::pwrite(fd,zero,4,16)==4,"zero block length");}
+        if(mode==2){char byte=0;require(::pread(fd,&byte,1,20)==1,"read block CRC");byte^=1;require(::pwrite(fd,&byte,1,20)==1,"corrupt block CRC");}
+        if(mode==3){require(::ftruncate(fd,static_cast<off_t>(fs::file_size(file)-1))==0,"truncate final block");}
+        if(mode==4){const char bad='9';require(::pwrite(fd,&bad,1,7)==1,"unsupported format version");}
+        require(::close(fd)==0,"close V2 fixture");
+        if(mode==0){stonekv::DB db(t.path.string());for(int i=0;i<700;++i)require(db.Get("key-"+std::to_string(i))==std::string(128,static_cast<char>('a'+i%26)),"multi-block read");}
+        else expectThrow([&]{stonekv::DB db(t.path.string());},"corrupt or unknown V2 SST rejected");
+    }
+}
 void corruptManifest() {
     Tmp t;
     { stonekv::DB db(t.path.string()); db.Put("key", "value"); db.Flush(); }
@@ -529,6 +566,8 @@ int main() {
         {"flush_and_reopen", flushReopen}, {"compaction_and_tombstones", compaction},
         {"auto_compaction", automaticCompaction}, {"input_and_exclusive_lock", validationAndLock},
         {"torn_wal_tail", tornWalTail}, {"corrupt_wal_fails_closed", corruptWal},
+        {"block_sst_and_legacy_compatibility", blockSstFormatAndLegacyCompatibility},
+        {"block_sst_corruption_and_boundaries", blockSstCorruptionAndBoundaries},
         {"corrupt_sst_fails_closed", corruptSst}, {"missing_manifest_fails_closed", missingManifest},
         {"corrupt_manifest_fails_closed", corruptManifest},
         {"manifest_trailing_garbage_fails_closed", manifestTrailingGarbageFailsClosed},

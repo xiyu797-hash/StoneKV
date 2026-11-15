@@ -1,0 +1,16 @@
+Internal ctest changing into directory: /tmp/stonekv_fd_red_20261115
+Test project /tmp/stonekv_fd_red_20261115
+    Start 1: stonekv_core
+1/5 Test #1: stonekv_core .....................   Passed    9.02 sec
+    Start 2: stonekv_io_faults
+2/5 Test #2: stonekv_io_faults ................   Passed    0.35 sec
+    Start 3: stonekv_background_flush
+3/5 Test #3: stonekv_background_flush .........   Passed    0.30 sec
+    Start 4: stonekv_background_compaction
+4/5 Test #4: stonekv_background_compaction ....   Passed    0.10 sec
+    Start 5: stonekv_sstable_handle_cache
+5/5 Test #5: stonekv_sstable_handle_cache .....   Passed    0.67 sec
+
+100% tests passed, 0 tests failed out of 5
+
+Total Test time (real) =  10.44 sec

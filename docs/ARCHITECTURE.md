@@ -63,20 +63,11 @@ Value          vlen bytes
 
 ## SST 格式（小端）
 
-```
-Magic("STONEKV1")  8 bytes
-Entry count        8 bytes
-Repeated entry:
-    Sequence       8 bytes
-    Kind           1 byte
-    Key length     4 bytes
-    Value length   4 bytes
-    CRC32          4 bytes (覆盖上述17字节+key+value)
-    Key            klen bytes
-    Value          vlen bytes
-```
+新写入为 `STONEKV2`：8 字节 magic，8 字节记录数，然后重复 block：`u32 payload_length`、`u32 payload_crc32`、payload。普通 block 的目标大小为 64 KiB；单条大记录可单独占一个更大的 block，受 key/value 上限约束。payload 内记录仍为 `seq:u64, kind:u8, klen:u32, vlen:u32, record_crc32:u32, key, value`，记录和 block 均有 CRC。空 SST 有0条记录和无 block。打开时检查 block 长度、CRC、记录长度、记录 CRC、排序和尾部；点读时重新验证记录 CRC。
 
-每个 SST 文件的键严格递增。启动时扫描 SST 校验 CRC 并重建**所有 key 的内存 offset index**和 Bloom Filter（布隆过滤器并未落盘）。ReadAt 按 offset 读取 Value 并再次验证 CRC。此实现没有 block cache；点查和扫描复用最多32个只读 SST 描述符（LRU），被 Compaction 替换的文件在提交后移除对应缓存句柄。Compaction 构建阶段为各源文件持独立描述符；读密集性能尚需实测且不应类比成熟存储引擎。
+读取兼容旧 `STONEKV1`（16字节 magic/记录数之后直接顺序记录）。无法识别的 magic/version 安全拒绝；旧二进制不能读取 V2 表，**即使 Flush 也不能把 V2 SST 变回 V1**，要降级需另行导出并用旧程序重建。格式更新前请备份；本项目未提供降级工具。
+
+当前 V2 是 block framing 的第一阶段：启动仍扫描所有记录、重建全量 key-offset 索引及内存 Bloom；Bloom 尚未持久化，block cache 和稀疏索引尚未实现。点查和扫描复用最多32个只读 SST 描述符（LRU），Compaction 为源 SST 使用独立读取句柄。不得将 V2 描述为已完成全部 block 索引与缓存优化。
 
 ## MANIFEST 格式及事务提交
 

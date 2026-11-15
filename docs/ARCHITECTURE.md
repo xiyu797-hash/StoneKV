@@ -2,6 +2,8 @@
 
 ## 数据路径
 
+下图为原同步实现的历史示意。当前 Flush 使用有界 immutable + 后台工作线程；精确锁与 WAL 回收语义见 [BACKGROUND_FLUSH.md](BACKGROUND_FLUSH.md)。Compaction 仍同步。
+
 ```text
               Put / Delete (单进程 DB::mutex)
                           |
@@ -41,7 +43,7 @@
 3. **恢复有界重放**：`durable_seq` 表示已进入 MANIFEST 管辖 SST 的最大序号；重启后 WAL 中 `seq <= durable_seq` 的记录跳过，以避免写入被双重应用。
 4. **Compaction 先提交后回收**：新 SST 被 manifest 引用前，旧 SST 都仍在；成功提交后才删除旧文件，崩溃后孤儿文件由进程锁保护下清理。
 5. **删除是记录**：Tombstone 参与读取覆盖，只有所有旧 SST 一并合并时才安全移除。
-6. **仅一个 writer 实例**：`flock` 排除跨进程冲突；`std::mutex` 将所有进程内操作串行化。
+6. **仅一个 writer 实例**：`flock` 排除跨进程冲突；`std::mutex` 串行化内存与 MANIFEST 状态转移，后台 SST 生成在锁外执行。
 
 ## WAL 格式（小端）
 

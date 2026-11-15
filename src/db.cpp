@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +20,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -403,11 +405,19 @@ struct DB::Impl {
     FD lock_fd;
     FD wal_fd;
     mutable std::mutex mutex;
+    std::condition_variable cv;
     Manifest manifest;
     std::uint64_t latest_seq{0};
     bool poisoned{false}; // 出现 I/O 提交异常后拒绝继续操作，避免重复序号或状态分叉
     std::map<std::string, Record> mem;
     std::size_t mem_bytes{0};
+    std::unique_ptr<std::map<std::string, Record>> immutable;
+    std::uint64_t immutable_seq{0};
+    std::size_t immutable_bytes{0};
+    bool barrier{false};
+    bool shutdown{false};
+    std::string background_error;
+    std::thread flush_worker;
     std::vector<SSTable> tables;
 
     explicit Impl(const std::string& directory, Options options) : dir(fs::absolute(directory).lexically_normal()), opt(options) {
@@ -453,6 +463,75 @@ struct DB::Impl {
                 std::error_code ec;
                 fs::remove(entry.path(), ec);
                 if (ec) fail("cannot clean orphan file " + name + ": " + ec.message());
+            }
+        }
+        flush_worker = std::thread([this] { backgroundLoop(); });
+    }
+
+    ~Impl() {
+        { std::lock_guard<std::mutex> lock(mutex); shutdown = true; }
+        cv.notify_all();
+        if (flush_worker.joinable()) flush_worker.join();
+    }
+
+    void freezeLocked() {
+        if (mem.empty() || immutable) return;
+        immutable = std::make_unique<std::map<std::string, Record>>();
+        immutable->swap(mem);
+        immutable_seq = latest_seq;
+        immutable_bytes = mem_bytes;
+        mem_bytes = 0;
+        cv.notify_all();
+    }
+
+    void waitForWrite(std::unique_lock<std::mutex>& lock) {
+        cv.wait(lock, [this] { return poisoned || (!barrier && !(immutable && mem_bytes >= opt.memtable_max_bytes)); });
+        if (poisoned) fail("database has an uncertain I/O commit; close and reopen it: " + background_error);
+    }
+
+    void backgroundLoop() noexcept {
+        std::unique_lock<std::mutex> lock(mutex);
+        for (;;) {
+            cv.wait(lock, [this] { return shutdown || poisoned || bool(immutable); });
+            if (poisoned || (!immutable && shutdown)) return;
+            const auto id = manifest.next_id;
+            const auto seq = immutable_seq;
+            try {
+                if (id == std::numeric_limits<std::uint64_t>::max()) fail("SST file id exhausted");
+                const auto* snapshot = immutable.get();
+                lock.unlock();
+                SSTWriter writer(dir / sstFilename(id));
+                for (const auto& kv : *snapshot) writer.Append(kv.first, kv.second);
+                writer.Finish();
+                maybeCrash("after_sst_rename");
+                SSTable table = loadSST(dir / sstFilename(id), id);
+                lock.lock();
+                if (poisoned) { cv.notify_all(); return; }
+                Manifest updated = manifest;
+                updated.files.push_back(id);
+                updated.next_id = id + 1;
+                updated.durable_seq = seq;
+                saveManifest(dir, updated);
+                maybeCrash("after_manifest_rename");
+                tables.push_back(std::move(table));
+                manifest = std::move(updated);
+                immutable.reset();
+                immutable_bytes = 0;
+                // Never truncate WAL while it may contain newer active writes.
+                if (mem.empty()) {
+                    truncateFile(wal_fd.fd, 0);
+                    if (::lseek(wal_fd.fd, 0, SEEK_END) < 0) fail(err("reset WAL position"));
+                    maybeCrash("after_wal_truncate");
+                }
+                if (tables.size() >= opt.compaction_trigger) compactLocked();
+                if (!barrier && !shutdown && mem_bytes >= opt.memtable_max_bytes) freezeLocked();
+                cv.notify_all();
+            } catch (const std::exception& e) {
+                if (!lock.owns_lock()) lock.lock();
+                poisoned = true; background_error = e.what(); cv.notify_all(); return;
+            } catch (...) {
+                if (!lock.owns_lock()) lock.lock();
+                poisoned = true; background_error = "unknown background flush failure"; cv.notify_all(); return;
             }
         }
     }
@@ -565,8 +644,8 @@ struct DB::Impl {
     }
     void mutate(const std::string& key, const std::string& val, std::uint8_t kind) {
         checkBounds(key.size(), val.size());
-        std::lock_guard<std::mutex> guard(mutex);
-        if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
+        std::unique_lock<std::mutex> guard(mutex);
+        waitForWrite(guard);
         if (latest_seq == std::numeric_limits<std::uint64_t>::max()) fail("sequence overflow");
         const auto seq = latest_seq + 1;
         try {
@@ -574,10 +653,10 @@ struct DB::Impl {
             appendWal(key, val, kind, seq);
             latest_seq = seq;
             setMem(key, {seq, kind == kDelete, val});
-            if (mem_bytes >= opt.memtable_max_bytes) flushLocked();
+            if (mem_bytes >= opt.memtable_max_bytes) freezeLocked();
         } catch (...) {
             // I/O 失败可能让磁盘落入“写了部分字节”的不确定状态，不可再沿用此实例。
-            poisoned = true;
+            poisoned = true; cv.notify_all();
             throw;
         }
     }
@@ -598,8 +677,8 @@ struct DB::Impl {
             payload += op.key;
             payload += op.value;
         }
-        std::lock_guard<std::mutex> guard(mutex);
-        if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
+        std::unique_lock<std::mutex> guard(mutex);
+        waitForWrite(guard);
         if (latest_seq == std::numeric_limits<std::uint64_t>::max()) fail("sequence overflow");
         const auto seq = latest_seq + 1;
         std::string header("SKB2", 4);
@@ -619,9 +698,9 @@ struct DB::Impl {
             for (const auto& op : operations) {
                 setMem(op.key, {seq, op.type == BatchOperation::Type::Delete, op.value});
             }
-            if (mem_bytes >= opt.memtable_max_bytes) flushLocked();
+            if (mem_bytes >= opt.memtable_max_bytes) freezeLocked();
         } catch (...) {
-            poisoned = true;
+            poisoned = true; cv.notify_all();
             throw;
         }
     }
@@ -630,6 +709,12 @@ struct DB::Impl {
         if (const auto it = mem.find(key); it != mem.end()) {
             if (it->second.deleted) return std::nullopt;
             return it->second.value;
+        }
+        if (immutable) {
+            if (const auto it = immutable->find(key); it != immutable->end()) {
+                if (it->second.deleted) return std::nullopt;
+                return it->second.value;
+            }
         }
         // 新的 SST 文件优先；同一键的较早版本被新值或墓碑覆盖。
         for (auto it = tables.rbegin(); it != tables.rend(); ++it) {
@@ -642,32 +727,6 @@ struct DB::Impl {
             return readAt(*it, *pos).value;
         }
         return std::nullopt;
-    }
-    void flushLocked() {
-        if (mem.empty()) return;
-        const auto id = manifest.next_id;
-        if (id == std::numeric_limits<std::uint64_t>::max()) fail("SST file id exhausted");
-        SSTWriter writer(dir / sstFilename(id));
-        // 先写 SST.tmp 并 fsync，再 rename；MANIFEST 提交之前不能截断 WAL。
-        for (const auto& kv : mem) writer.Append(kv.first, kv.second);
-        writer.Finish();
-        maybeCrash("after_sst_rename");
-        SSTable new_table = loadSST(dir / sstFilename(id), id);
-        Manifest updated = manifest;
-        updated.files.push_back(id);
-        updated.next_id = id + 1;
-        updated.durable_seq = latest_seq;
-        saveManifest(dir, updated);
-        maybeCrash("after_manifest_rename");
-        tables.push_back(std::move(new_table));
-        manifest = std::move(updated);
-        mem.clear();
-        mem_bytes = 0;
-        // MANIFEST 已持久化后，才能清空 WAL；崩溃重放会跳过 <= durable_seq 的旧记录。
-        truncateFile(wal_fd.fd, 0);
-        if (::lseek(wal_fd.fd, 0, SEEK_END) < 0) fail(err("reset WAL position"));
-        maybeCrash("after_wal_truncate");
-        if (tables.size() >= opt.compaction_trigger) compactLocked();
     }
     void compactLocked() {
         if (tables.size() < 2) return;
@@ -728,18 +787,31 @@ struct DB::Impl {
         syncDir(dir);
     }
     void flush() {
-        std::lock_guard<std::mutex> lock(mutex);
-        if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
-        try { flushLocked(); } catch (...) { poisoned = true; throw; }
+        std::unique_lock<std::mutex> lock(mutex);
+        flushBarrier(lock, false);
     }
     void compact() {
-        std::lock_guard<std::mutex> lock(mutex);
-        if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
-        try { flushLocked(); compactLocked(); } catch (...) { poisoned = true; throw; }
+        std::unique_lock<std::mutex> lock(mutex);
+        flushBarrier(lock, true);
+    }
+    void flushBarrier(std::unique_lock<std::mutex>& lock, bool compact_after) {
+        cv.wait(lock, [this] { return poisoned || !barrier; });
+        if (poisoned) fail("database has an uncertain I/O commit; close and reopen it: " + background_error);
+        barrier = true;
+        try {
+            cv.wait(lock, [this] { return poisoned || !immutable; });
+            if (poisoned) fail("background flush failed: " + background_error);
+            freezeLocked();
+            cv.wait(lock, [this] { return poisoned || !immutable; });
+            if (poisoned) fail("background flush failed: " + background_error);
+            if (compact_after) compactLocked();
+            barrier = false; cv.notify_all();
+        } catch (...) { poisoned = true; barrier = false; cv.notify_all(); throw; }
     }
     Stats stats() const {
         std::lock_guard<std::mutex> lock(mutex);
-        return {latest_seq, manifest.durable_seq, mem.size(), mem_bytes, tables.size(), fileSize(wal_fd.fd)};
+        return {latest_seq, manifest.durable_seq, mem.size() + (immutable ? immutable->size() : 0),
+                mem_bytes + immutable_bytes, tables.size(), fileSize(wal_fd.fd)};
     }
     std::vector<std::pair<std::string, std::string>> scan(
         const std::string& begin, const std::string& end, std::size_t limit) const {
@@ -748,7 +820,10 @@ struct DB::Impl {
         std::lock_guard<std::mutex> lock(mutex);
         if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
         std::vector<std::pair<std::string, Record>> mem_records;
-        for (auto it = mem.lower_bound(begin); it != mem.end(); ++it) {
+        std::map<std::string, Record> merged;
+        if (immutable) merged = *immutable;
+        for (const auto& kv : mem) merged.insert_or_assign(kv.first, kv.second);
+        for (auto it = merged.lower_bound(begin); it != merged.end(); ++it) {
             if (!end.empty() && it->first >= end) break;
             mem_records.push_back(*it);
         }

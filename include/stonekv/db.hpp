@@ -11,7 +11,8 @@
 namespace stonekv {
 
 // V1 is a Linux-only, single-process LSM-inspired KV store.
-// Multiple threads may call DB concurrently; all DB operations are serialized.
+// Multiple threads may call DB concurrently; public state transitions are
+// serialized, while the background worker builds an immutable SST outside the lock.
 // The caller must keep DB alive until its threads finish.
 struct Options {
     std::size_t memtable_max_bytes = 4U * 1024U * 1024U;
@@ -58,7 +59,9 @@ public:
         const std::string& begin = "", const std::string& end = "",
         std::size_t limit = 100) const;
 
-    // Flush is a durability boundary for sync_writes=false mode.
+    // Flush waits for all preceding writes to reach a committed SST and is a
+    // durability boundary for sync_writes=false mode. Background I/O failures
+    // poison the instance; close and reopen after investigating the error.
     void Flush();
     void Compact();  // synchronous full compaction (all current SSTables)
     Stats GetStats() const;

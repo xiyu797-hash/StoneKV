@@ -67,7 +67,7 @@ Value          vlen bytes
 
 读取兼容旧 `STONEKV1`（16字节 magic/记录数之后直接顺序记录）。无法识别的 magic/version 安全拒绝；旧二进制不能读取 V2 表，**即使 Flush 也不能把 V2 SST 变回 V1**，要降级需另行导出并用旧程序重建。格式更新前请备份；本项目未提供降级工具。
 
-当前 V2 是 block framing 的第一阶段：启动仍扫描所有记录、重建全量 key-offset 索引及内存 Bloom；Bloom 尚未持久化，block cache 和稀疏索引尚未实现。点查和扫描复用最多32个只读 SST 描述符（LRU），Compaction 为源 SST 使用独立读取句柄。不得将 V2 描述为已完成全部 block 索引与缓存优化。
+当前 V2 是 block framing 的第一阶段：启动仍扫描所有记录、重建全量 key-offset 索引及内存 Bloom；Bloom 尚未持久化，稀疏索引尚未实现。V2 block 使用基于载荷字节计量的 LRU，默认8 MiB、可配置0至256 MiB；超出容量的单块按需读取但不缓存。容量统计不包括容器元数据。V1 记录仍按原方式读取，不进入该 block cache。点查和扫描复用最多32个只读 SST 描述符（LRU），Compaction 为源 SST 使用独立读取句柄。不得将 V2 描述为已完成全部 block 索引与缓存优化。
 
 ## MANIFEST 格式及事务提交
 

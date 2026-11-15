@@ -18,6 +18,8 @@ struct Options {
     std::size_t memtable_max_bytes = 4U * 1024U * 1024U;
     std::size_t compaction_trigger = 4;
     bool sync_writes = true;  // default: fsync each WAL mutation before returning
+    // Maximum cached block payload bytes; zero disables the block cache.
+    std::size_t block_cache_capacity_bytes = 8U * 1024U * 1024U;
 };
 
 // A WriteBatch is atomically replayed from one WAL record.
@@ -41,6 +43,9 @@ struct Stats {
     std::uint64_t compaction_micros = 0;
     std::uint64_t compaction_output_bytes = 0;
     std::size_t background_tasks = 0;
+    std::size_t block_cache_bytes = 0;
+    std::uint64_t block_cache_hits = 0;
+    std::uint64_t block_cache_misses = 0;
 };
 
 class DB final {

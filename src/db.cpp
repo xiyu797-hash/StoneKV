@@ -212,7 +212,10 @@ struct Bloom {
 };
 
 struct Record { std::uint64_t seq; bool deleted; std::string value; };
-struct IndexEntry { std::string key; std::uint64_t offset; std::uint64_t seq; bool deleted; };
+struct IndexEntry {
+    std::string key; std::uint64_t offset; std::uint64_t seq; bool deleted;
+    std::uint64_t block_offset{0}; std::uint32_t block_bytes{0}; std::uint32_t block_crc{0};
+};
 struct SSTable {
     std::uint64_t id{0};
     fs::path path;
@@ -311,6 +314,8 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
     table.bloom.Initialize(static_cast<std::size_t>(count));
     std::uint64_t off = 16;
     std::uint64_t block_end = off;
+    std::uint64_t block_start = 0;
+    std::uint32_t block_bytes = 0, block_checksum = 0;
     std::string prev;
     for (std::uint64_t i = 0; i < count; ++i) {
         if (block_format && off == block_end) {
@@ -322,6 +327,7 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
             preadAll(fd.fd, block.data(), block.size(), off + 8);
             if (crc32(block) != get32(bh + 4)) fail("SST block CRC mismatch");
             off += 8;
+            block_start = off; block_bytes = bytes; block_checksum = get32(bh + 4);
             block_end = off + bytes;
         }
         const auto limit = block_format ? block_end : size;
@@ -340,7 +346,7 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
         preadAll(fd.fd, value.data(), value.size(), off + kSstHead + klen);
         if (crcParts(rh, 17, key, value) != get32(rh + 17)) fail("SST CRC mismatch");
         if (!prev.empty() && !(prev < key)) fail("SST keys unsorted/duplicated");
-        table.index.push_back({key, off, seq, kind == kDelete});
+        table.index.push_back({key, off, seq, kind == kDelete, block_start, block_bytes, block_checksum});
         table.bloom.Add(key);
         prev = std::move(key);
         off += kSstHead + static_cast<std::uint64_t>(klen) + vlen;
@@ -458,10 +464,15 @@ struct DB::Impl {
     // A bounded LRU of descriptors used only under mutex; compaction has its
     // own short-lived readers. Keeping 32 avoids an unbounded descriptor cost.
     mutable std::list<std::pair<std::uint64_t, FD>> read_handles;
+    struct CachedBlock { std::uint64_t table_id; std::uint64_t offset; std::string data; };
+    mutable std::list<CachedBlock> block_cache;
+    mutable std::size_t block_cache_bytes{0};
+    mutable std::uint64_t block_cache_hits{0}, block_cache_misses{0};
 
     explicit Impl(const std::string& directory, Options options) : dir(fs::absolute(directory).lexically_normal()), opt(options) {
-        if (options.memtable_max_bytes < 1024 || options.compaction_trigger < 2)
-            fail("memtable_max_bytes must be >=1024 and compaction_trigger >=2");
+        if (options.memtable_max_bytes < 1024 || options.compaction_trigger < 2 ||
+            options.block_cache_capacity_bytes > 256U * 1024U * 1024U)
+            fail("invalid memtable, compaction, or block cache options");
         createDirectoriesDurably(dir);
         lock_fd = FD(::open((dir / "LOCK").c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644));
         if (lock_fd.fd < 0) fail(err("open LOCK"));
@@ -777,7 +788,7 @@ struct DB::Impl {
                 [](const IndexEntry& e, const std::string& k) { return e.key < k; });
             if (pos == idx.end() || pos->key != key) continue;
             if (pos->deleted) return std::nullopt;
-            return readAt(*it, *pos, cachedReader(*it)).value;
+            return cachedRead(*it, *pos).value;
         }
         return std::nullopt;
     }
@@ -793,6 +804,47 @@ struct DB::Impl {
         read_handles.emplace_front(table.id, std::move(fd));
         if (read_handles.size() > 32) read_handles.pop_back();
         return read_handles.front().second.fd;
+    }
+    Record cachedRead(const SSTable& table, const IndexEntry& item) const {
+        if (item.block_bytes == 0 || opt.block_cache_capacity_bytes == 0)
+            return readAt(table, item, cachedReader(table));
+        auto found = block_cache.end();
+        for (auto it = block_cache.begin(); it != block_cache.end(); ++it) {
+            if (it->table_id == table.id && it->offset == item.block_offset) { found = it; break; }
+        }
+        std::string uncached;
+        const std::string* data = nullptr;
+        if (found != block_cache.end()) {
+            ++block_cache_hits;
+            block_cache.splice(block_cache.begin(), block_cache, found);
+            data = &block_cache.front().data;
+        } else {
+            ++block_cache_misses;
+            uncached.resize(item.block_bytes);
+            preadAll(cachedReader(table), uncached.data(), uncached.size(), item.block_offset);
+            if (crc32(uncached) != item.block_crc) fail("SST cached block CRC mismatch");
+            if (uncached.size() <= opt.block_cache_capacity_bytes) {
+                while (!block_cache.empty() && block_cache_bytes > opt.block_cache_capacity_bytes - uncached.size()) {
+                    block_cache_bytes -= block_cache.back().data.size(); block_cache.pop_back();
+                }
+                block_cache.emplace_front(CachedBlock{table.id, item.block_offset, std::move(uncached)});
+                block_cache_bytes += block_cache.front().data.size();
+                data = &block_cache.front().data;
+            } else data = &uncached;
+        }
+        if (item.offset < item.block_offset) fail("invalid SST block record offset");
+        const auto rel = item.offset - item.block_offset;
+        if (rel > data->size() || data->size() - rel < kSstHead) fail("truncated cached SST header");
+        const char* h = data->data() + static_cast<std::size_t>(rel);
+        const auto seq = get64(h); const auto kind = static_cast<std::uint8_t>(h[8]);
+        const auto kl = get32(h + 9), vl = get32(h + 13);
+        if (kl != item.key.size() || seq != item.seq || (kind == kDelete) != item.deleted ||
+            (kind != kPut && kind != kDelete) || vl > kMaxValue ||
+            static_cast<std::uint64_t>(kl) + vl > data->size() - rel - kSstHead)
+            fail("cached SST index/data mismatch");
+        std::string key(h + kSstHead, kl), value(h + kSstHead + kl, vl);
+        if (key != item.key || get32(h + 17) != crcParts(h, 17, key, value)) fail("cached SST record CRC mismatch");
+        return {seq, kind == kDelete, std::move(value)};
     }
     // Only the worker changes tables and manifest. While it builds the merged
     // SST without the mutex, readers can safely use the unchanged old tables.
@@ -857,6 +909,11 @@ struct DB::Impl {
         read_handles.remove_if([&](const auto& handle) {
             return std::find(old.begin(), old.end(), handle.first) != old.end();
         });
+        for (auto it = block_cache.begin(); it != block_cache.end();) {
+            if (std::find(old.begin(), old.end(), it->table_id) != old.end()) {
+                block_cache_bytes -= it->data.size(); it = block_cache.erase(it);
+            } else ++it;
+        }
         for (auto old_id : old) {
             std::error_code ec;
             fs::remove(dir / sstFilename(old_id), ec);
@@ -901,7 +958,8 @@ struct DB::Impl {
         cv.wait(lock, [this] { return poisoned || !compaction_pending || tables.size() < opt.compaction_trigger; });
         return {latest_seq, manifest.durable_seq, mem.size() + (immutable ? immutable->size() : 0),
                 mem_bytes + immutable_bytes, tables.size(), fileSize(wal_fd.fd), compaction_count,
-                compaction_micros, compaction_output_bytes, static_cast<std::size_t>(bool(immutable)) + static_cast<std::size_t>(compaction_pending)};
+                compaction_micros, compaction_output_bytes, static_cast<std::size_t>(bool(immutable)) + static_cast<std::size_t>(compaction_pending),
+                block_cache_bytes, block_cache_hits, block_cache_misses};
     }
     std::vector<std::pair<std::string, std::string>> scan(
         const std::string& begin, const std::string& end, std::size_t limit) const {
@@ -951,7 +1009,7 @@ struct DB::Impl {
                 if (best.source == 0) result.emplace_back(key, mem_records[best.index].second.value);
                 else {
                     const auto& table = tables[best.source - 1];
-                    result.emplace_back(key, readAt(table, table.index[best.index], cachedReader(table)).value);
+                    result.emplace_back(key, cachedRead(table, table.index[best.index]).value);
                 }
             }
         }

@@ -22,6 +22,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <utility>
@@ -222,13 +223,14 @@ struct IndexEntry {
     std::string key; std::uint64_t offset; std::uint64_t seq; bool deleted;
     std::uint64_t block_offset{0}; std::uint32_t block_bytes{0}; std::uint32_t block_crc{0};
 };
-struct SparseBlock { std::uint64_t offset; std::uint32_t bytes; std::string first_key; };
+struct SparseBlock { std::uint64_t offset; std::uint32_t bytes; std::string first_key; std::uint32_t crc{0}; };
 struct SSTable {
     std::uint64_t id{0};
     fs::path path;
     std::vector<IndexEntry> index;
     Bloom bloom;
     std::vector<SparseBlock> sparse_blocks;
+    bool sparse_index{false};
 };
 std::string sstFilename(std::uint64_t id) {
     std::ostringstream s;
@@ -345,7 +347,8 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
     SSTable table;
     table.id = id;
     table.path = path;
-    table.index.reserve(static_cast<std::size_t>(count));
+    table.sparse_index = indexed_format;
+    if (!indexed_format) table.index.reserve(static_cast<std::size_t>(count));
     std::uint64_t data_end = size;
     if (indexed_format) {
         if (size < 16 + 28) fail("short indexed SST footer");
@@ -404,6 +407,7 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
             if (crc32(block) != get32(bh + 4)) fail("SST block CRC mismatch");
             off += 8;
             block_start = off; block_bytes = bytes; block_checksum = get32(bh + 4);
+            if (indexed_format) table.sparse_blocks[block_number].crc = block_checksum;
             block_end = off + bytes;
             first_in_block = true;
         }
@@ -426,7 +430,8 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
         if (indexed_format && first_in_block && table.sparse_blocks[block_number].first_key != key)
             fail("SST sparse index first key mismatch");
         if (first_in_block) { ++block_number; first_in_block = false; }
-        table.index.push_back({key, off, seq, kind == kDelete, block_start, block_bytes, block_checksum});
+        if (!indexed_format)
+            table.index.push_back({key, off, seq, kind == kDelete, block_start, block_bytes, block_checksum});
         if (indexed_format) { if (!table.bloom.MayContain(key)) fail("SST Bloom false negative"); }
         else table.bloom.Add(key);
         prev = std::move(key);
@@ -452,6 +457,38 @@ Record readAt(const SSTable& table, const IndexEntry& item, int reader_fd = -1) 
     preadAll(fd, value.data(), value.size(), item.offset + kSstHead + klen);
     if (key != item.key || get32(h + 17) != crcParts(h, 17, key, value)) fail("SST read CRC mismatch");
     return {seq, kind == kDelete, std::move(value)};
+}
+
+std::vector<IndexEntry> parseSparseBlock(const SparseBlock& block, const std::string& data) {
+    if (data.size() != block.bytes || crc32(data) != block.crc) fail("SST block CRC mismatch while reading");
+    std::vector<IndexEntry> entries;
+    std::size_t pos = 0;
+    std::string previous;
+    while (pos < data.size()) {
+        if (data.size() - pos < kSstHead) fail("truncated sparse block record header");
+        const char* h = data.data() + pos;
+        const auto seq = get64(h); const auto kind = static_cast<std::uint8_t>(h[8]);
+        const auto kl = get32(h + 9), vl = get32(h + 13);
+        if (kind != kPut && kind != kDelete) fail("invalid sparse block record kind");
+        checkBounds(kl, vl);
+        if (static_cast<std::uint64_t>(kl) + vl > data.size() - pos - kSstHead)
+            fail("truncated sparse block record");
+        std::string key(h + kSstHead, kl), value(h + kSstHead + kl, vl);
+        if (crcParts(h, 17, key, value) != get32(h + 17) || (!previous.empty() && !(previous < key)))
+            fail("sparse block record CRC or ordering mismatch");
+        if (entries.empty() && key != block.first_key) fail("sparse block first key mismatch");
+        entries.push_back({key, block.offset + 8 + pos, seq, kind == kDelete, block.offset + 8, block.bytes, block.crc});
+        previous = std::move(key);
+        pos += kSstHead + static_cast<std::size_t>(kl) + static_cast<std::size_t>(vl);
+    }
+    if (entries.empty()) fail("empty sparse block");
+    return entries;
+}
+
+std::vector<IndexEntry> readSparseBlockIndex(const SparseBlock& block, int fd) {
+    std::string data(block.bytes, '\0');
+    preadAll(fd, data.data(), data.size(), block.offset + 8);
+    return parseSparseBlock(block, data);
 }
 
 struct Manifest {
@@ -865,6 +902,16 @@ struct DB::Impl {
         // 新的 SST 文件优先；同一键的较早版本被新值或墓碑覆盖。
         for (auto it = tables.rbegin(); it != tables.rend(); ++it) {
             if (!it->bloom.MayContain(key)) continue;
+            if (it->sparse_index) {
+                auto block = std::upper_bound(it->sparse_blocks.begin(), it->sparse_blocks.end(), key,
+                    [](const std::string& k, const SparseBlock& b) { return k < b.first_key; });
+                if (block == it->sparse_blocks.begin()) continue;
+                --block;
+                auto entry = findSparseEntry(*it, *block, key);
+                if (!entry) continue;
+                if (entry->deleted) return std::nullopt;
+                return cachedRead(*it, *entry).value;
+            }
             const auto& idx = it->index;
             auto pos = std::lower_bound(idx.begin(), idx.end(), key,
                 [](const IndexEntry& e, const std::string& k) { return e.key < k; });
@@ -887,33 +934,64 @@ struct DB::Impl {
         if (read_handles.size() > 32) read_handles.pop_back();
         return read_handles.front().second.fd;
     }
-    Record cachedRead(const SSTable& table, const IndexEntry& item) const {
-        if (item.block_bytes == 0 || opt.block_cache_capacity_bytes == 0)
-            return readAt(table, item, cachedReader(table));
+    const std::string& cachedBlock(const SSTable& table, std::uint64_t offset,
+                                   std::uint32_t bytes, std::uint32_t checksum,
+                                   std::string& scratch) const {
         auto found = block_cache.end();
         for (auto it = block_cache.begin(); it != block_cache.end(); ++it) {
-            if (it->table_id == table.id && it->offset == item.block_offset) { found = it; break; }
+            if (it->table_id == table.id && it->offset == offset) { found = it; break; }
         }
-        std::string uncached;
-        const std::string* data = nullptr;
         if (found != block_cache.end()) {
             ++block_cache_hits;
             block_cache.splice(block_cache.begin(), block_cache, found);
-            data = &block_cache.front().data;
-        } else {
-            ++block_cache_misses;
-            uncached.resize(item.block_bytes);
-            preadAll(cachedReader(table), uncached.data(), uncached.size(), item.block_offset);
-            if (crc32(uncached) != item.block_crc) fail("SST cached block CRC mismatch");
-            if (uncached.size() <= opt.block_cache_capacity_bytes) {
-                while (!block_cache.empty() && block_cache_bytes > opt.block_cache_capacity_bytes - uncached.size()) {
-                    block_cache_bytes -= block_cache.back().data.size(); block_cache.pop_back();
-                }
-                block_cache.emplace_front(CachedBlock{table.id, item.block_offset, std::move(uncached)});
-                block_cache_bytes += block_cache.front().data.size();
-                data = &block_cache.front().data;
-            } else data = &uncached;
+            return block_cache.front().data;
         }
+        ++block_cache_misses;
+        scratch.resize(bytes);
+        preadAll(cachedReader(table), scratch.data(), scratch.size(), offset);
+        if (crc32(scratch) != checksum) fail("SST cached block CRC mismatch");
+        if (scratch.size() <= opt.block_cache_capacity_bytes) {
+            while (!block_cache.empty() && block_cache_bytes > opt.block_cache_capacity_bytes - scratch.size()) {
+                block_cache_bytes -= block_cache.back().data.size(); block_cache.pop_back();
+            }
+            block_cache.emplace_front(CachedBlock{table.id, offset, std::move(scratch)});
+            block_cache_bytes += block_cache.front().data.size();
+            return block_cache.front().data;
+        }
+        return scratch;
+    }
+    std::vector<IndexEntry> cachedSparseBlockIndex(const SSTable& table, const SparseBlock& block) const {
+        std::string scratch;
+        const auto& data = cachedBlock(table, block.offset + 8, block.bytes, block.crc, scratch);
+        return parseSparseBlock(block, data);
+    }
+    std::optional<IndexEntry> findSparseEntry(const SSTable& table, const SparseBlock& block,
+                                               const std::string& key) const {
+        std::string scratch;
+        const auto& data = cachedBlock(table, block.offset + 8, block.bytes, block.crc, scratch);
+        std::size_t pos = 0;
+        while (pos < data.size()) {
+            if (data.size() - pos < kSstHead) fail("truncated sparse block record header");
+            const char* h = data.data() + pos;
+            const auto seq = get64(h); const auto kind = static_cast<std::uint8_t>(h[8]);
+            const auto kl = get32(h + 9), vl = get32(h + 13);
+            if (kind != kPut && kind != kDelete) fail("invalid sparse block record kind");
+            checkBounds(kl, vl);
+            if (static_cast<std::uint64_t>(kl) + vl > data.size() - pos - kSstHead)
+                fail("truncated sparse block record");
+            const std::string_view current(h + kSstHead, kl);
+            const int cmp = current.compare(key);
+            if (cmp == 0) return IndexEntry{key, block.offset + 8 + pos, seq, kind == kDelete,
+                                           block.offset + 8, block.bytes, block.crc};
+            if (cmp > 0) break;
+            pos += kSstHead + static_cast<std::size_t>(kl) + static_cast<std::size_t>(vl);
+        }
+        return std::nullopt;
+    }
+    Record cachedRead(const SSTable& table, const IndexEntry& item) const {
+        if (item.block_bytes == 0) return readAt(table, item, cachedReader(table));
+        std::string scratch;
+        const auto* data = &cachedBlock(table, item.block_offset, item.block_bytes, item.block_crc, scratch);
         if (item.offset < item.block_offset) fail("invalid SST block record offset");
         const auto rel = item.offset - item.block_offset;
         if (rel > data->size() || data->size() - rel < kSstHead) fail("truncated cached SST header");
@@ -946,11 +1024,24 @@ struct DB::Impl {
             if (fd.fd < 0) fail(err("open compaction source SST"));
             readers.push_back(std::move(fd));
         }
+        // The persistent V3 index stays sparse in the open DB. This initial
+        // merge implementation materializes V3 key offsets only for the
+        // duration of compaction; a streaming cursor can remove this peak.
+        std::vector<std::vector<IndexEntry>> temporary_indexes(tables.size());
+        for (std::size_t i = 0; i < tables.size(); ++i) {
+            if (!tables[i].sparse_index) continue;
+            for (const auto& block : tables[i].sparse_blocks) {
+                auto entries = readSparseBlockIndex(block, readers[i].fd);
+                temporary_indexes[i].insert(temporary_indexes[i].end(),
+                    std::make_move_iterator(entries.begin()), std::make_move_iterator(entries.end()));
+            }
+        }
         std::priority_queue<SourceEntry, std::vector<SourceEntry>, KeyGreater> pq;
         auto push = [&](std::size_t src, std::size_t pos) {
             const auto& table = tables[src];
-            if (pos < table.index.size()) {
-                const auto& item = table.index[pos];
+            const auto& index = table.sparse_index ? temporary_indexes[src] : table.index;
+            if (pos < index.size()) {
+                const auto& item = index[pos];
                 pq.push({item.key, item.seq, item.deleted, src + 1, pos});
             }
         };
@@ -966,7 +1057,8 @@ struct DB::Impl {
             // Since all SSTables are merged, no older disk version can be exposed.
             if (!best.deleted) {
                 const auto& tab = tables[best.source - 1];
-                writer.Append(key, readAt(tab, tab.index[best.index], readers[best.source - 1].fd));
+                const auto& index = tab.sparse_index ? temporary_indexes[best.source - 1] : tab.index;
+                writer.Append(key, readAt(tab, index[best.index], readers[best.source - 1].fd));
             }
         }
         writer.Finish();
@@ -1038,10 +1130,12 @@ struct DB::Impl {
         // Preserve the API's historical threshold observation: when an
         // automatic full compaction is due, report after it has settled.
         cv.wait(lock, [this] { return poisoned || !compaction_pending || tables.size() < opt.compaction_trigger; });
+        std::size_t full_entries = 0, sparse_blocks = 0;
+        for (const auto& table : tables) { full_entries += table.index.size(); sparse_blocks += table.sparse_blocks.size(); }
         return {latest_seq, manifest.durable_seq, mem.size() + (immutable ? immutable->size() : 0),
                 mem_bytes + immutable_bytes, tables.size(), fileSize(wal_fd.fd), compaction_count,
                 compaction_micros, compaction_output_bytes, static_cast<std::size_t>(bool(immutable)) + static_cast<std::size_t>(compaction_pending),
-                block_cache_bytes, block_cache_hits, block_cache_misses};
+                block_cache_bytes, block_cache_hits, block_cache_misses, full_entries, sparse_blocks};
     }
     std::vector<std::pair<std::string, std::string>> scan(
         const std::string& begin, const std::string& end, std::size_t limit) const {
@@ -1057,6 +1151,17 @@ struct DB::Impl {
             if (!end.empty() && it->first >= end) break;
             mem_records.push_back(*it);
         }
+        // Scan currently materializes sparse V3 key offsets transiently;
+        // the open DB retains only block index entries between operations.
+        std::vector<std::vector<IndexEntry>> temporary_indexes(tables.size());
+        for (std::size_t i = 0; i < tables.size(); ++i) {
+            if (!tables[i].sparse_index) continue;
+            for (const auto& block : tables[i].sparse_blocks) {
+                auto entries = cachedSparseBlockIndex(tables[i], block);
+                temporary_indexes[i].insert(temporary_indexes[i].end(),
+                    std::make_move_iterator(entries.begin()), std::make_move_iterator(entries.end()));
+            }
+        }
         std::priority_queue<SourceEntry, std::vector<SourceEntry>, KeyGreater> pq;
         auto push = [&](std::size_t src, std::size_t pos) {
             if (src == 0) {
@@ -1064,7 +1169,8 @@ struct DB::Impl {
                 const auto& e = mem_records[pos];
                 pq.push({e.first, e.second.seq, e.second.deleted, src, pos});
             } else {
-                const auto& idx = tables[src - 1].index;
+                const auto& table = tables[src - 1];
+                const auto& idx = table.sparse_index ? temporary_indexes[src - 1] : table.index;
                 if (pos >= idx.size()) return;
                 const auto& item = idx[pos];
                 if (!end.empty() && item.key >= end) return;
@@ -1073,7 +1179,8 @@ struct DB::Impl {
         };
         push(0, 0);
         for (std::size_t src = 1; src <= tables.size(); ++src) {
-            const auto& idx = tables[src - 1].index;
+            const auto& table = tables[src - 1];
+            const auto& idx = table.sparse_index ? temporary_indexes[src - 1] : table.index;
             const auto it = std::lower_bound(idx.begin(), idx.end(), begin,
                 [](const IndexEntry& e, const std::string& k) { return e.key < k; });
             push(src, static_cast<std::size_t>(it - idx.begin()));
@@ -1091,7 +1198,8 @@ struct DB::Impl {
                 if (best.source == 0) result.emplace_back(key, mem_records[best.index].second.value);
                 else {
                     const auto& table = tables[best.source - 1];
-                    result.emplace_back(key, cachedRead(table, table.index[best.index]).value);
+                    const auto& idx = table.sparse_index ? temporary_indexes[best.source - 1] : table.index;
+                    result.emplace_back(key, cachedRead(table, idx[best.index]).value);
                 }
             }
         }

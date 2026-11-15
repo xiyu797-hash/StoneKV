@@ -46,6 +46,8 @@ struct Stats {
     std::size_t block_cache_bytes = 0;
     std::uint64_t block_cache_hits = 0;
     std::uint64_t block_cache_misses = 0;
+    std::size_t sst_full_index_entries = 0;
+    std::size_t sst_sparse_blocks = 0;
 };
 
 class DB final {

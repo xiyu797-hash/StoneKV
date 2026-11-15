@@ -1,0 +1,16 @@
+[PASS] wal_length_header_corruption_fails_closed
+[PASS] v2_magic_corruption_fails_closed
+[PASS] legacy_wal_mixed_version_replay
+[PASS] v2_incomplete_tail_preserves_prior_record
+[PASS] exhausted_sst_id_fails_closed
+[PASS] basic_and_reopen
+[PASS] binary_values
+[PASS] ordered_scan
+[PASS] flush_and_reopen
+[PASS] compaction_and_tombstones
+[PASS] auto_compaction
+[PASS] input_and_exclusive_lock
+[PASS] torn_wal_tail
+[PASS] corrupt_wal_fails_closed
+[PASS] block_sst_and_legacy_compatibility
+[FAIL] block_sst_corruption_and_boundaries : assertion: V3 retains sparse block entries rather than all keys

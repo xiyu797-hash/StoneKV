@@ -184,7 +184,7 @@ void blockSstFormatAndLegacyCompatibility() {
     {std::ofstream out(t.path/"MANIFEST",std::ios::binary|std::ios::trunc);out<<payload<<"crc32 "<<std::hex<<std::setw(8)<<std::setfill('0')<<crc(payload)<<'\n';require(bool(out),"write V1 fixture manifest");}
     {stonekv::DB db(t.path.string(),opt(1024*1024,100));require(db.Get("old")=="one" && db.Get("mid")=="two","V1/V2 table reads");db.Put("new","two");db.Flush();}
     {std::ifstream in(t.path/"SST-000000000003.sst",std::ios::binary);char magic[8]{};in.read(magic,8);require(in.gcount()==8 && std::string(magic,8)=="STONEKV3","new tables must use V3 persisted metadata format");}
-    {stonekv::DB db(t.path.string(),opt(1024*1024,100));require(db.Get("old")=="one" && db.Get("mid")=="two" && db.Get("new")=="two","mixed V1/V2/V3 reopen");db.Compact();}
+    {stonekv::DB db(t.path.string(),opt(1024*1024,100));require(db.Get("old")=="one" && db.Get("mid")=="two" && db.Get("new")=="two","mixed V1/V2/V3 reopen");const auto st=db.GetStats();require(st.sst_full_index_entries==2 && st.sst_sparse_blocks==1,"legacy full and V3 sparse index counts");db.Compact();}
     {stonekv::DB db(t.path.string());require(db.Get("old")=="one" && db.Get("mid")=="two" && db.Get("new")=="two","mixed version compaction");}
 }
 void blockSstCorruptionAndBoundaries() {
@@ -221,7 +221,7 @@ void blockSstCorruptionAndBoundaries() {
             require(::pwrite(fd,footer,28,static_cast<off_t>(size-28))==28,"write mutated footer");
         }
         require(::close(fd)==0,"close V2 fixture");
-        if(mode==0){stonekv::DB db(t.path.string());for(int i=0;i<700;++i)require(db.Get("key-"+std::to_string(i))==std::string(128,static_cast<char>('a'+i%26)),"multi-block read");}
+        if(mode==0){stonekv::DB db(t.path.string(),opt(1024*1024,100));const auto st=db.GetStats();require(st.sst_sparse_blocks>=2 && st.sst_full_index_entries==0,"V3 retains sparse block entries rather than all keys");for(int i=0;i<700;++i)require(db.Get("key-"+std::to_string(i))==std::string(128,static_cast<char>('a'+i%26)),"multi-block read");require(db.Scan("","",1000).size()==700,"multi-block scan");db.Put("key-345","new");db.Delete("key-12");db.Flush();db.Compact();require(db.Get("key-345")=="new" && !db.Get("key-12") && db.Scan("","",1000).size()==699,"multi-block compaction and tombstone");}
         else expectThrow([&]{stonekv::DB db(t.path.string());},"corrupt or unknown V2 SST rejected");
     }
 }

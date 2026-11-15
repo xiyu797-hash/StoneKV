@@ -63,11 +63,13 @@ Value          vlen bytes
 
 ## SST 格式（小端）
 
-新写入为 `STONEKV2`：8 字节 magic，8 字节记录数，然后重复 block：`u32 payload_length`、`u32 payload_crc32`、payload。普通 block 的目标大小为 64 KiB；单条大记录可单独占一个更大的 block，受 key/value 上限约束。payload 内记录仍为 `seq:u64, kind:u8, klen:u32, vlen:u32, record_crc32:u32, key, value`，记录和 block 均有 CRC。空 SST 有0条记录和无 block。打开时检查 block 长度、CRC、记录长度、记录 CRC、排序和尾部；点读时重新验证记录 CRC。
+新写入 `STONEKV3`：8字节 magic、8字节记录数，然后重复 block：`u32 payload_length`、`u32 payload_crc32`、payload。目标 block 为64 KiB；单条较大记录可独占一个更大的 block，受 key/value 上限约束。payload 记录为 `seq:u64, kind:u8, klen:u32, vlen:u32, record_crc32:u32, key, value`。
 
-读取兼容旧 `STONEKV1`（16字节 magic/记录数之后直接顺序记录）。无法识别的 magic/version 安全拒绝；旧二进制不能读取 V2 表，**即使 Flush 也不能把 V2 SST 变回 V1**，要降级需另行导出并用旧程序重建。格式更新前请备份；本项目未提供降级工具。
+block 后是 `IDX3` 元数据：block 数、Bloom 的 bit/byte 数、各 block 的文件偏移/长度/首键，以及 Bloom 位数组；最后28字节是 `SKV3TAIL`、元数据偏移、长度及其CRC32。打开时验证 footer 边界、元数据CRC、稀疏首键及offset与各block一致，扫描所有记录校验 block/记录CRC、排序与 Bloom 不存在假阴性，再加载持久化 Bloom。元数据上限256 MiB。空 SST 不含 block，但含有效空 Bloom 与元数据。无法识别的版本、错误长度/校验及不匹配索引会拒绝打开。
 
-当前 V2 是 block framing 的第一阶段：启动仍扫描所有记录、重建全量 key-offset 索引及内存 Bloom；Bloom 尚未持久化，稀疏索引尚未实现。V2 block 使用基于载荷字节计量的 LRU，默认8 MiB、可配置0至256 MiB；超出容量的单块按需读取但不缓存。容量统计不包括容器元数据。V1 记录仍按原方式读取，不进入该 block cache。点查和扫描复用最多32个只读 SST 描述符（LRU），Compaction 为源 SST 使用独立读取句柄。不得将 V2 描述为已完成全部 block 索引与缓存优化。
+兼容读取 `STONEKV1`（记录直接顺序存放）和 `STONEKV2`（block framing，无尾部索引及 Bloom）。旧版二进制不能读取 V3；降级前必须备份，并用旧版本能识别的方式导出重建，本项目尚无自动降级工具。
+
+当前 V3 持久化了块级稀疏索引元数据，但启动仍扫描所有记录并重建全量 key-offset 索引，**纯稀疏读取与内存缩减尚未实现**。V2/V3 block 使用按载荷字节计量的 LRU，默认8 MiB、可配置0至256 MiB；超容量块不缓存，统计不包括容器元数据。V1 记录仍走原读取方式。最多32个 SST 只读描述符复用；Compaction 为源 SST 保持独立句柄。
 
 ## MANIFEST 格式及事务提交
 

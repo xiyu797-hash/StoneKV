@@ -177,17 +177,20 @@ void blockSstFormatAndLegacyCompatibility() {
     std::string entry;u64(entry,1);entry.push_back(1);u32(entry,3);u32(entry,3);const auto checksum=crc(entry+"oldone");u32(entry,checksum);entry+="oldone";
     std::string old("STONEKV1",8);u64(old,1);old+=entry;
     {std::ofstream out(t.path/"SST-000000000001.sst",std::ios::binary);out.write(old.data(),static_cast<std::streamsize>(old.size()));require(bool(out),"write independent V1 SST");}
-    const std::string payload="STONEKV_MANIFEST_V1\n1 2 1\n1\n";
+    std::string entry2;u64(entry2,2);entry2.push_back(1);u32(entry2,3);u32(entry2,3);const auto c2=crc(entry2+"midtwo");u32(entry2,c2);entry2+="midtwo";
+    std::string v2("STONEKV2",8);u64(v2,1);u32(v2,static_cast<std::uint32_t>(entry2.size()));u32(v2,crc(entry2));v2+=entry2;
+    {std::ofstream out(t.path/"SST-000000000002.sst",std::ios::binary);out.write(v2.data(),static_cast<std::streamsize>(v2.size()));require(bool(out),"write independent V2 SST");}
+    const std::string payload="STONEKV_MANIFEST_V1\n2 3 2\n1\n2\n";
     {std::ofstream out(t.path/"MANIFEST",std::ios::binary|std::ios::trunc);out<<payload<<"crc32 "<<std::hex<<std::setw(8)<<std::setfill('0')<<crc(payload)<<'\n';require(bool(out),"write V1 fixture manifest");}
-    {stonekv::DB db(t.path.string(),opt(1024*1024,100));require(db.Get("old")=="one","V1 table read");db.Put("new","two");db.Flush();}
-    {std::ifstream in(t.path/"SST-000000000002.sst",std::ios::binary);char magic[8]{};in.read(magic,8);require(in.gcount()==8 && std::string(magic,8)=="STONEKV2","new tables must use block V2 format");}
-    {stonekv::DB db(t.path.string(),opt(1024*1024,100));require(db.Get("old")=="one" && db.Get("new")=="two","mixed V1/V2 reopen");db.Compact();}
-    {stonekv::DB db(t.path.string());require(db.Get("old")=="one" && db.Get("new")=="two","mixed version compaction");}
+    {stonekv::DB db(t.path.string(),opt(1024*1024,100));require(db.Get("old")=="one" && db.Get("mid")=="two","V1/V2 table reads");db.Put("new","two");db.Flush();}
+    {std::ifstream in(t.path/"SST-000000000003.sst",std::ios::binary);char magic[8]{};in.read(magic,8);require(in.gcount()==8 && std::string(magic,8)=="STONEKV3","new tables must use V3 persisted metadata format");}
+    {stonekv::DB db(t.path.string(),opt(1024*1024,100));require(db.Get("old")=="one" && db.Get("mid")=="two" && db.Get("new")=="two","mixed V1/V2/V3 reopen");db.Compact();}
+    {stonekv::DB db(t.path.string());require(db.Get("old")=="one" && db.Get("mid")=="two" && db.Get("new")=="two","mixed version compaction");}
 }
 void blockSstCorruptionAndBoundaries() {
-    for (int mode=0; mode<5; ++mode) {
+    for (int mode=0; mode<9; ++mode) {
         Tmp t;
-        { stonekv::DB db(t.path.string(),opt(1024*1024,100));
+        { stonekv::DB db(t.path.string(),opt(1024*1024,100,false));
           for(int i=0;i<700;++i)db.Put("key-"+std::to_string(i),std::string(128,static_cast<char>('a'+i%26)));
           db.Flush(); }
         fs::path file;
@@ -201,6 +204,22 @@ void blockSstCorruptionAndBoundaries() {
         if(mode==2){char byte=0;require(::pread(fd,&byte,1,20)==1,"read block CRC");byte^=1;require(::pwrite(fd,&byte,1,20)==1,"corrupt block CRC");}
         if(mode==3){require(::ftruncate(fd,static_cast<off_t>(fs::file_size(file)-1))==0,"truncate final block");}
         if(mode==4){const char bad='9';require(::pwrite(fd,&bad,1,7)==1,"unsupported format version");}
+        if(mode>=5){
+            const auto size=fs::file_size(file);char footer[28];require(::pread(fd,footer,28,static_cast<off_t>(size-28))==28,"read metadata footer");
+            auto get64le=[](const char* p){std::uint64_t x=0;for(int i=0;i<8;++i)x|=std::uint64_t(static_cast<unsigned char>(p[i]))<<(8*i);return x;};
+            const auto off=get64le(footer+8),len=get64le(footer+16);require(std::string(footer,8)=="SKV3TAIL" && len>=20 && off+len+28==size,"V3 footer bounds");
+            std::string meta(static_cast<std::size_t>(len),'\0');require(::pread(fd,meta.data(),meta.size(),static_cast<off_t>(off))==static_cast<ssize_t>(meta.size()),"read metadata");
+            if(mode==5)footer[24]^=1;
+            if(mode==6)meta[0]^=1;
+            if(mode==7 || mode==8){
+                if(mode==7){const auto n=std::uint32_t(static_cast<unsigned char>(meta[16]))|(std::uint32_t(static_cast<unsigned char>(meta[17]))<<8U)|(std::uint32_t(static_cast<unsigned char>(meta[18]))<<16U)|(std::uint32_t(static_cast<unsigned char>(meta[19]))<<24U);require(n>0 && n<=meta.size(),"Bloom length");std::fill(meta.end()-n,meta.end(),0);}
+                else {require(meta.size()>36,"sparse metadata entry");meta[36]='!';}
+                std::uint32_t crc=0xffffffffU;for(unsigned char c:meta){crc^=c;for(int i=0;i<8;++i)crc=(crc>>1U)^((crc&1U)?0xedb88320U:0U);}crc=~crc;
+                for(int i=0;i<4;++i)footer[24+i]=static_cast<char>((crc>>(8*i))&255U);
+            }
+            require(::pwrite(fd,meta.data(),meta.size(),static_cast<off_t>(off))==static_cast<ssize_t>(meta.size()),"write mutated metadata");
+            require(::pwrite(fd,footer,28,static_cast<off_t>(size-28))==28,"write mutated footer");
+        }
         require(::close(fd)==0,"close V2 fixture");
         if(mode==0){stonekv::DB db(t.path.string());for(int i=0;i<700;++i)require(db.Get("key-"+std::to_string(i))==std::string(128,static_cast<char>('a'+i%26)),"multi-block read");}
         else expectThrow([&]{stonekv::DB db(t.path.string());},"corrupt or unknown V2 SST rejected");

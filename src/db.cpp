@@ -47,8 +47,11 @@ constexpr std::size_t kMaxBatchBytes = 32U * 1024U * 1024U;
 constexpr std::size_t kSstHead = 21; // seq8 kind1 keylen4 vallen4 crc4
 constexpr const char* kSstMagic = "STONEKV1"; // 8 bytes
 constexpr const char* kSstBlockMagic = "STONEKV2";
+constexpr const char* kSstIndexedMagic = "STONEKV3";
+constexpr const char* kSstFooterMagic = "SKV3TAIL";
 constexpr std::size_t kSstBlockTarget = 64U * 1024U;
 constexpr std::size_t kSstBlockMax = kMaxValue + kMaxKey + kSstHead;
+constexpr std::size_t kSstMetadataMax = 256U * 1024U * 1024U;
 constexpr const char* kManifestMagic = "STONEKV_MANIFEST_V1";
 constexpr std::uint8_t kPut = 1;
 constexpr std::uint8_t kDelete = 2;
@@ -188,11 +191,14 @@ struct Bloom {
     std::vector<std::uint8_t> bits;
     std::size_t total_bits{0};
     void Initialize(std::size_t keys) {
+        if (keys > (std::numeric_limits<std::size_t>::max() - 7) / 10) fail("Bloom size overflow");
         total_bits = std::max<std::size_t>(64, keys * 10);
         bits.assign((total_bits + 7) / 8, 0);
     }
     void Add(const std::string& key) {
-        const auto h1 = hash64(key);
+        AddHash(hash64(key));
+    }
+    void AddHash(std::uint64_t h1) {
         const auto h2 = (h1 >> 17U) | 1ULL;
         for (std::uint64_t i = 0; i < 7; ++i) {
             const auto pos = static_cast<std::size_t>((h1 + i * h2) % total_bits);
@@ -216,11 +222,13 @@ struct IndexEntry {
     std::string key; std::uint64_t offset; std::uint64_t seq; bool deleted;
     std::uint64_t block_offset{0}; std::uint32_t block_bytes{0}; std::uint32_t block_crc{0};
 };
+struct SparseBlock { std::uint64_t offset; std::uint32_t bytes; std::string first_key; };
 struct SSTable {
     std::uint64_t id{0};
     fs::path path;
     std::vector<IndexEntry> index;
     Bloom bloom;
+    std::vector<SparseBlock> sparse_blocks;
 };
 std::string sstFilename(std::uint64_t id) {
     std::ostringstream s;
@@ -243,7 +251,7 @@ public:
         : final_(final_path), temp_(final_path.string() + ".tmp"),
           out_(::open(temp_.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644)) {
         if (out_.fd < 0) fail(err("create SST"));
-        std::string head(kSstBlockMagic, 8);
+        std::string head(kSstIndexedMagic, 8);
         put64(head, 0);
         writeAll(out_.fd, head.data(), head.size());
     }
@@ -259,14 +267,34 @@ public:
         put32(head, crc);
         const auto record_size = head.size() + key.size() + r.value.size();
         if (!block_.empty() && block_.size() + record_size > kSstBlockTarget) flushBlock();
+        if (block_.empty()) block_first_ = key;
         block_ += head;
         block_ += key;
         block_ += r.value;
+        hashes_.push_back(hash64(key));
         ++count_;
         prev_ = key;
     }
     void Finish() {
         flushBlock();
+        Bloom bloom; bloom.Initialize(hashes_.size());
+        for (auto h : hashes_) bloom.AddHash(h);
+        if (blocks_.size() > std::numeric_limits<std::uint32_t>::max() ||
+            bloom.bits.size() > std::numeric_limits<std::uint32_t>::max()) fail("SST metadata too large");
+        std::string meta("IDX3", 4);
+        put32(meta, static_cast<std::uint32_t>(blocks_.size()));
+        put64(meta, bloom.total_bits);
+        put32(meta, static_cast<std::uint32_t>(bloom.bits.size()));
+        for (const auto& b : blocks_) {
+            put64(meta, b.offset); put32(meta, b.bytes);
+            put32(meta, static_cast<std::uint32_t>(b.first_key.size())); meta += b.first_key;
+            if (meta.size() > kSstMetadataMax) fail("SST metadata too large");
+        }
+        if (bloom.bits.size() > kSstMetadataMax - meta.size()) fail("SST metadata too large");
+        meta.append(reinterpret_cast<const char*>(bloom.bits.data()), bloom.bits.size());
+        std::string footer(kSstFooterMagic, 8);
+        put64(footer, file_offset_); put64(footer, meta.size()); put32(footer, crc32(meta));
+        writeAll(out_.fd, meta.data(), meta.size()); writeAll(out_.fd, footer.data(), footer.size());
         std::string count;
         put64(count, count_);
         pwriteAll(out_.fd, count.data(), count.size(), 8);
@@ -286,12 +314,18 @@ private:
         put32(header, crc32(block_));
         writeAll(out_.fd, header.data(), header.size());
         writeAll(out_.fd, block_.data(), block_.size());
+        blocks_.push_back({file_offset_, static_cast<std::uint32_t>(block_.size()), std::move(block_first_)});
+        file_offset_ += header.size() + block_.size();
         block_.clear();
     }
     fs::path final_, temp_;
     FD out_;
     std::string prev_;
     std::string block_;
+    std::string block_first_;
+    std::vector<std::uint64_t> hashes_;
+    std::vector<SparseBlock> blocks_;
+    std::uint64_t file_offset_{16};
     std::uint64_t count_{0};
     bool finished_{false};
 };
@@ -303,7 +337,8 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
     if (size < 16) fail("short SST: " + path.string());
     char head[16];
     preadAll(fd.fd, head, sizeof(head), 0);
-    const bool block_format = std::memcmp(head, kSstBlockMagic, 8) == 0;
+    const bool indexed_format = std::memcmp(head, kSstIndexedMagic, 8) == 0;
+    const bool block_format = indexed_format || std::memcmp(head, kSstBlockMagic, 8) == 0;
     if (!block_format && std::memcmp(head, kSstMagic, 8) != 0) fail("invalid SST magic or unsupported version");
     const auto count = get64(head + 8);
     if (count > (size - 16) / (kSstHead + 1)) fail("invalid SST count");
@@ -311,24 +346,66 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
     table.id = id;
     table.path = path;
     table.index.reserve(static_cast<std::size_t>(count));
-    table.bloom.Initialize(static_cast<std::size_t>(count));
+    std::uint64_t data_end = size;
+    if (indexed_format) {
+        if (size < 16 + 28) fail("short indexed SST footer");
+        char footer[28]; preadAll(fd.fd, footer, sizeof(footer), size - sizeof(footer));
+        if (std::memcmp(footer, kSstFooterMagic, 8) != 0) fail("invalid SST footer magic");
+        const auto meta_offset = get64(footer + 8), meta_length = get64(footer + 16);
+        if (meta_offset < 16 || meta_offset > size - sizeof(footer) ||
+            meta_length != size - sizeof(footer) - meta_offset || meta_length < 20 || meta_length > kSstMetadataMax)
+            fail("invalid SST metadata bounds");
+        std::string meta(static_cast<std::size_t>(meta_length), '\0');
+        preadAll(fd.fd, meta.data(), meta.size(), meta_offset);
+        if (crc32(meta) != get32(footer + 24) || std::memcmp(meta.data(), "IDX3", 4) != 0)
+            fail("SST metadata CRC or magic mismatch");
+        const auto blocks = get32(meta.data() + 4);
+        const auto bloom_bits = get64(meta.data() + 8);
+        const auto bloom_bytes = get32(meta.data() + 16);
+        if (bloom_bits < 64 || bloom_bits > kSstMetadataMax * 8ULL ||
+            bloom_bytes != (bloom_bits + 7) / 8 || blocks > (meta.size() - 20) / 17)
+            fail("invalid SST sparse index or Bloom size");
+        std::size_t pos = 20;
+        std::string prior_key;
+        for (std::uint32_t i = 0; i < blocks; ++i) {
+            if (meta.size() - pos < 16) fail("truncated SST sparse index");
+            const auto offset = get64(meta.data() + pos);
+            const auto bytes = get32(meta.data() + pos + 8), keylen = get32(meta.data() + pos + 12);
+            pos += 16;
+            if (keylen == 0 || keylen > kMaxKey || keylen > meta.size() - pos || bytes == 0 || bytes > kSstBlockMax)
+                fail("invalid SST sparse index entry");
+            std::string first(meta.data() + pos, keylen); pos += keylen;
+            if (!prior_key.empty() && !(prior_key < first)) fail("unsorted SST sparse index");
+            prior_key = first; table.sparse_blocks.push_back({offset, bytes, std::move(first)});
+        }
+        if (bloom_bytes != meta.size() - pos) fail("invalid SST Bloom payload size");
+        table.bloom.total_bits = static_cast<std::size_t>(bloom_bits);
+        table.bloom.bits.assign(meta.begin() + static_cast<std::ptrdiff_t>(pos), meta.end());
+        data_end = meta_offset;
+    } else table.bloom.Initialize(static_cast<std::size_t>(count));
     std::uint64_t off = 16;
     std::uint64_t block_end = off;
     std::uint64_t block_start = 0;
     std::uint32_t block_bytes = 0, block_checksum = 0;
+    std::size_t block_number = 0;
+    bool first_in_block = false;
     std::string prev;
     for (std::uint64_t i = 0; i < count; ++i) {
         if (block_format && off == block_end) {
-            if (off > size || size - off < 8) fail("truncated SST block header");
+            if (off > data_end || data_end - off < 8) fail("truncated SST block header");
             char bh[8]; preadAll(fd.fd, bh, sizeof(bh), off);
             const auto bytes = get32(bh);
-            if (bytes == 0 || bytes > kSstBlockMax || size - off - 8 < bytes) fail("invalid SST block length");
+            if (bytes == 0 || bytes > kSstBlockMax || data_end - off - 8 < bytes) fail("invalid SST block length");
+            if (indexed_format && (block_number >= table.sparse_blocks.size() ||
+                table.sparse_blocks[block_number].offset != off || table.sparse_blocks[block_number].bytes != bytes))
+                fail("SST sparse index/block mismatch");
             std::string block(bytes, '\0');
             preadAll(fd.fd, block.data(), block.size(), off + 8);
             if (crc32(block) != get32(bh + 4)) fail("SST block CRC mismatch");
             off += 8;
             block_start = off; block_bytes = bytes; block_checksum = get32(bh + 4);
             block_end = off + bytes;
+            first_in_block = true;
         }
         const auto limit = block_format ? block_end : size;
         if (off > limit || limit - off < kSstHead) fail("truncated SST record header");
@@ -346,12 +423,17 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
         preadAll(fd.fd, value.data(), value.size(), off + kSstHead + klen);
         if (crcParts(rh, 17, key, value) != get32(rh + 17)) fail("SST CRC mismatch");
         if (!prev.empty() && !(prev < key)) fail("SST keys unsorted/duplicated");
+        if (indexed_format && first_in_block && table.sparse_blocks[block_number].first_key != key)
+            fail("SST sparse index first key mismatch");
+        if (first_in_block) { ++block_number; first_in_block = false; }
         table.index.push_back({key, off, seq, kind == kDelete, block_start, block_bytes, block_checksum});
-        table.bloom.Add(key);
+        if (indexed_format) { if (!table.bloom.MayContain(key)) fail("SST Bloom false negative"); }
+        else table.bloom.Add(key);
         prev = std::move(key);
         off += kSstHead + static_cast<std::uint64_t>(klen) + vlen;
     }
-    if (off != size || (block_format && off != block_end)) fail("unexpected trailing bytes in SST");
+    if (off != data_end || (block_format && off != block_end) ||
+        (indexed_format && block_number != table.sparse_blocks.size())) fail("unexpected trailing bytes in SST");
     return table;
 }
 Record readAt(const SSTable& table, const IndexEntry& item, int reader_fd = -1) {

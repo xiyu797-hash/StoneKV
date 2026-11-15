@@ -1,6 +1,6 @@
 # StoneKV v1.0 — C++17/Linux 本地持久化 KV 引擎
 
-> 后台 Flush：一个有界 immutable MemTable 由工作线程生成 SST；写入背压、WAL 回收与关闭语义见 [后台 Flush 设计](docs/BACKGROUND_FLUSH.md)。Compaction 由同一后台工作线程调度，调用方等待其完成；SST V2 增加有界 block cache；分段 WAL、SST 稀疏索引和持久化 Bloom 尚未实现。
+> 后台 Flush：一个有界 immutable MemTable 由工作线程生成 SST；写入背压、WAL 回收与关闭语义见 [后台 Flush 设计](docs/BACKGROUND_FLUSH.md)。Compaction 由同一后台工作线程调度，调用方等待其完成；SST V3 包含持久化 Bloom 和块级稀疏索引元数据，并支持有界 block cache；当前仍重建全量键索引，分段 WAL 与纯稀疏读取路径尚未实现。
 
 > 一个可编译、可运行、可故障注入和可测试的 **LSM-inspired（LSM 思想）教学/求职项目**，不是 RocksDB 替代品。项目由独立文件格式、WAL + fsync、MemTable、SSTable、Bloom Filter、原子 MANIFEST、同步全量 Compaction 构成。请先运行测试，再根据自己的理解决定是否写入简历。
 
@@ -12,7 +12,7 @@
 | WAL | ✅ | `SKW1` 记录、单调 seq、CRC32、尾部不完整记录截断；中间 CRC 错误拒绝开启 |
 | 持久化 | ✅ | 默认每次写入后 `fsync(WAL)`；SST 与 MANIFEST 均 `fsync + rename + fsync(dir)` |
 | MemTable | ✅ | `std::map` 有序索引，超过内存阈值冻结并后台刷盘 |
-| SSTable | ✅ | V2 block framing（block/记录 CRC，兼容读取 V1）、内存全量 **key-offset 索引**，按需读取值 |
+| SSTable | ✅ | V3 block framing（block/记录/元数据 CRC，兼容读取 V1/V2）、内存全量 **key-offset 索引**，按需读取值 |
 | Bloom Filter | ✅ | 每文件内存常驻、约 10 bits/key、7 轮哈希（启动时重建，非持久化） |
 | 读取 / 范围查询 | ✅ | `Get` 从新到旧查；`Scan` 多路有序归并、尊重覆盖与 Tombstone |
 | Compaction | ✅ | 基于多路归并的**同步全量合并**，完成后清理旧 SST；非 leveled compaction |

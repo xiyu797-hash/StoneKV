@@ -292,6 +292,93 @@ void largeValue() {
     { stonekv::DB db(t.path.string(), opt(1024 * 1024, 3)); db.Put("big", v); db.Flush(); }
     { stonekv::DB db(t.path.string(), opt(1024 * 1024, 3)); require(db.Get("big") == v, "large value survives SST"); }
 }
+void batchAtomic() {
+    using Op = stonekv::BatchOperation;
+    Tmp t;
+    {
+        stonekv::DB db(t.path.string(), opt(1024, 100));
+        db.Put("keep", "old");
+        db.Put("erase", "value");
+        db.Flush();
+        const auto before = db.GetStats().latest_sequence;
+        db.WriteBatch({{Op::Type::Put, "keep", "new"},
+                       {Op::Type::Put, "repeated", "first"},
+                       {Op::Type::Delete, "erase", ""},
+                       {Op::Type::Put, "repeated", "last"},
+                       {Op::Type::Put, "binary", std::string("x\0y", 3)}});
+        require(db.GetStats().latest_sequence == before + 1, "batch allocates one sequence");
+        require(db.Get("keep") == "new", "batch overwrite");
+        require(!db.Get("erase"), "batch delete");
+        require(db.Get("repeated") == "last", "repeated batch key last wins");
+        require(db.Get("binary") == std::string("x\0y", 3), "batch binary value");
+        db.Flush(); db.Compact();
+    }
+    {
+        stonekv::DB db(t.path.string());
+        require(db.Get("keep") == "new" && !db.Get("erase"), "batch survives compaction reopen");
+        require(db.Get("repeated") == "last", "batch order survives reopen");
+    }
+}
+void batchValidation() {
+    using Op = stonekv::BatchOperation;
+    Tmp t;
+    stonekv::DB db(t.path.string());
+    db.WriteBatch({});
+    require(db.GetStats().latest_sequence == 0, "empty batch no-op");
+    expectThrow([&] { db.WriteBatch({{Op::Type::Delete, "key", "invalid"}}); }, "delete value forbidden");
+    expectThrow([&] { db.WriteBatch({{Op::Type::Put, "", "bad"}}); }, "empty batch key");
+    std::vector<Op> too_many(4097, {Op::Type::Put, "key", "value"});
+    expectThrow([&] { db.WriteBatch(too_many); }, "max batch op count");
+    require(db.GetStats().latest_sequence == 0, "validation failures do not poison db");
+    db.WriteBatch({{Op::Type::Put, "valid", "ok"}});
+    require(db.Get("valid") == "ok", "batch after invalid input");
+}
+void batchTornTail() {
+    using Op = stonekv::BatchOperation;
+    Tmp t;
+    { stonekv::DB db(t.path.string()); db.Put("safe", "yes"); }
+    const auto wal = t.path / "active.wal";
+    const auto before = fs::file_size(wal);
+    { std::ofstream out(wal, std::ios::binary | std::ios::app); out.write("SKB1\x01\x02", 6); }
+    stonekv::DB db(t.path.string());
+    require(db.Get("safe") == "yes", "torn batch preserves previous writes");
+    require(db.GetStats().wal_bytes == before, "torn batch truncated as one record");
+    db.WriteBatch({{Op::Type::Put, "after", "ok"}});
+    require(db.Get("after") == "ok", "writes after torn batch recover");
+}
+void batchCorruption() {
+    using Op = stonekv::BatchOperation;
+    Tmp t;
+    { stonekv::DB db(t.path.string()); db.WriteBatch({{Op::Type::Put, "key", "value"}}); }
+    const auto wal = t.path / "active.wal";
+    const int fd = ::open(wal.c_str(), O_WRONLY);
+    require(fd >= 0, "open batch WAL for corruption");
+    const char x = 'z';
+    require(::pwrite(fd, &x, 1, 24 + 9 + 3) == 1, "flip batch payload byte");
+    ::close(fd);
+    expectThrow([&] { stonekv::DB db(t.path.string()); }, "WAL batch checksum must fail closed");
+}
+void batchCrashReplay() {
+    using Op = stonekv::BatchOperation;
+    Tmp t;
+    const auto pid = ::fork();
+    require(pid >= 0, "fork batch crash");
+    if (pid == 0) {
+        ::setenv("STONEKV_FAILPOINT", "after_batch_wal_sync", 1);
+        stonekv::DB db(t.path.string());
+        db.WriteBatch({{Op::Type::Put, "first", "one"},
+                       {Op::Type::Put, "second", "two"},
+                       {Op::Type::Delete, "third", ""}});
+        ::_exit(0);
+    }
+    int status = 0;
+    require(::waitpid(pid, &status, 0) == pid, "wait batch crash");
+    require(WIFEXITED(status) && WEXITSTATUS(status) == 86, "expected batch WAL sync crash");
+    stonekv::DB db(t.path.string());
+    require(db.Get("first") == "one" && db.Get("second") == "two", "whole batch recovered");
+    require(!db.Get("third"), "batch tombstone recovered");
+    require(db.GetStats().latest_sequence == 1, "batch sequence after crash");
+}
 } // namespace
 
 int main() {
@@ -312,7 +399,12 @@ int main() {
         {"crash_after_wal_truncate", [] { crashPoint("after_wal_truncate"); }},
         {"crash_during_compaction_before_commit", [] { crashPoint("after_compaction_sst_rename", true); }},
         {"crash_during_compaction_after_commit", [] { crashPoint("after_compaction_manifest", true); }},
-        {"large_binary_value", largeValue}
+        {"large_binary_value", largeValue},
+        {"batch_atomic_and_reopen", batchAtomic},
+        {"batch_validation", batchValidation},
+        {"batch_torn_tail", batchTornTail},
+        {"batch_crc_fails_closed", batchCorruption},
+        {"batch_crash_replay", batchCrashReplay}
     };
     for (const auto& test : tests) {
         try { test.second(); std::cout << "[PASS] " << test.first << '\n'; }

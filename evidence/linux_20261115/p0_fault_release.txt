@@ -1,0 +1,65 @@
+COMMAND: cmake -S . -B /tmp/stonekv_p0_fault_release_20261115 -DCMAKE_BUILD_TYPE=Release
+-- The CXX compiler identification is GNU 13.3.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE  
+-- Configuring done (0.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /tmp/stonekv_p0_fault_release_20261115
+CONFIG_EXIT=0
+COMMAND: cmake --build /tmp/stonekv_p0_fault_release_20261115 -j 4
+[ 10%] Building CXX object CMakeFiles/stonekv.dir/src/db.cpp.o
+[ 20%] Linking CXX static library libstonekv.a
+[ 20%] Built target stonekv
+[ 40%] Building CXX object CMakeFiles/stonekv_bench.dir/tools/bench.cpp.o
+[ 40%] Building CXX object CMakeFiles/stonekv_tests.dir/tests/test_db.cpp.o
+[ 60%] Building CXX object CMakeFiles/stonekv_cli.dir/tools/cli.cpp.o
+[ 60%] Building CXX object CMakeFiles/stonekv_io_fault_tests.dir/tests/io_fault_regression.cpp.o
+[ 70%] Linking CXX executable stonekv_cli
+[ 70%] Built target stonekv_cli
+[ 80%] Linking CXX executable stonekv_bench
+[ 80%] Built target stonekv_bench
+[ 90%] Linking CXX executable stonekv_io_fault_tests
+[ 90%] Built target stonekv_io_fault_tests
+[100%] Linking CXX executable stonekv_tests
+[100%] Built target stonekv_tests
+BUILD_EXIT=0
+COMMAND: ctest --test-dir /tmp/stonekv_p0_fault_release_20261115 --output-on-failure
+Internal ctest changing into directory: /tmp/stonekv_p0_fault_release_20261115
+Test project /tmp/stonekv_p0_fault_release_20261115
+    Start 1: stonekv_core
+1/2 Test #1: stonekv_core .....................   Passed    1.94 sec
+    Start 2: stonekv_io_faults
+2/2 Test #2: stonekv_io_faults ................   Passed    0.29 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Total Test time (real) =   2.23 sec
+CTEST_EXIT=0
+COMMAND: /tmp/stonekv_p0_fault_release_20261115/stonekv_io_fault_tests
+PASS wal_write_enospc reopened; uncertain=absent
+PASS wal_write_eio reopened; uncertain=absent
+PASS wal_partial_write_eio reopened; uncertain=absent
+PASS wal_fsync_eio reopened; uncertain=present
+PASS batch_write_enospc reopened; uncertain=absent
+PASS batch_partial_write_eio reopened; uncertain=absent
+PASS batch_fsync_eio reopened; uncertain=absent
+PASS sst_write_enospc reopened; uncertain=absent
+PASS sst_write_eio reopened; uncertain=absent
+PASS sst_fsync_eio reopened; uncertain=absent
+PASS manifest_write_enospc reopened; uncertain=absent
+PASS manifest_write_eio reopened; uncertain=absent
+PASS manifest_fsync_eio reopened; uncertain=absent
+PASS sst_dir_fsync_eio reopened; uncertain=absent
+PASS manifest_dir_fsync_eio reopened; uncertain=absent
+PASS compact_sst_enospc reopened; uncertain=absent
+PASS compact_sst_fsync_eio reopened; uncertain=absent
+PASS compact_manifest_eio reopened; uncertain=absent
+PASS compact_manifest_dir_fsync_eio reopened; uncertain=absent
+PASS all 19 I/O fault cases; fixtures="/tmp/stonekv-io-fault-NFhrxL"
+IO_TEST_EXIT=0

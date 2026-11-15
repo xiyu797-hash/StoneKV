@@ -1,0 +1,2 @@
+[FAIL] wal_length_header_corruption_fails_closed : expected exception: corrupt WAL length must not be mistaken for torn tail
+EXIT_CODE=1

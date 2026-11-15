@@ -20,6 +20,13 @@
 
 **未实现：** 分布式副本、事务/批量原子提交、MVCC/快照、后台 Compaction、真正的分层 LSM、分块 Block Cache、压缩、动态内存上限、跨进程并发共享、Windows 原生文件 I/O、网络接口、全路径断电测试。
 
+## 1.1 工程增强分支说明（待合并）
+
+- `WriteBatch`：在一条 `SKB1` WAL 记录中提交最多 4096 个操作、最多 32 MiB 编码载荷；重放时整批验证 CRC 后才应用。同一键多次操作以最后一次为准。**保证记录重放原子性，不提供快照隔离/MVCC**。
+- 全量 Compaction 使用每个 SST 一个只读文件句柄，避免为每个 key 单独 open/close；尚未在服务器上形成配对性能结论。
+- 新增 5 个批量写入边界/损坏/崩溃测试，CI 覆盖 GCC/Clang Release 及 GCC ASan/UBSan。
+- 服务器复现实验见 [`docs/SERVER_TASKBOOK.md`](docs/SERVER_TASKBOOK.md) 和 `scripts/server_validation.sh`。
+
 ## 2. 三条命令开始（Linux / WSL2）
 
 需要 **Linux、CMake ≥3.16、支持 C++17 的 g++/clang++**：

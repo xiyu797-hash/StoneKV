@@ -1,7 +1,9 @@
 name: Linux C++ CI
 on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
 jobs:
-  test:
+  release:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -15,3 +17,16 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel 2
       - name: CTest
         run: ctest --test-dir build --output-on-failure
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure and build (ASan + UBSan)
+        env:
+          CXX: g++
+        run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DSTONEKV_ENABLE_SANITIZERS=ON && cmake --build build-asan --parallel 2
+      - name: CTest (ASan + UBSan)
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-asan --output-on-failure

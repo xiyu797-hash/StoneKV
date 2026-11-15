@@ -35,6 +35,9 @@ namespace fs = std::filesystem;
 constexpr std::size_t kMaxKey = 4096;
 constexpr std::size_t kMaxValue = 8U * 1024U * 1024U;
 constexpr std::size_t kWalHead = 25; // magic4 seq8 kind1 keylen4 vallen4 crc4
+constexpr std::size_t kBatchHead = 24; // magic4 seq8 count4 payloadlen4 crc4
+constexpr std::size_t kMaxBatchOperations = 4096;
+constexpr std::size_t kMaxBatchBytes = 32U * 1024U * 1024U;
 constexpr std::size_t kSstHead = 21; // seq8 kind1 keylen4 vallen4 crc4
 constexpr const char* kSstMagic = "STONEKV1"; // 8 bytes
 constexpr const char* kManifestMagic = "STONEKV_MANIFEST_V1";
@@ -297,19 +300,20 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
     if (off != size) fail("unexpected trailing bytes in SST");
     return table;
 }
-Record readAt(const SSTable& table, const IndexEntry& item) {
-    FD fd(::open(table.path.c_str(), O_RDONLY | O_CLOEXEC));
-    if (fd.fd < 0) fail(err("read SST"));
+Record readAt(const SSTable& table, const IndexEntry& item, int reader_fd = -1) {
+    FD opened(reader_fd < 0 ? ::open(table.path.c_str(), O_RDONLY | O_CLOEXEC) : -1);
+    if (reader_fd < 0 && opened.fd < 0) fail(err("read SST"));
+    const int fd = reader_fd >= 0 ? reader_fd : opened.fd;
     char h[kSstHead];
-    preadAll(fd.fd, h, sizeof(h), item.offset);
+    preadAll(fd, h, sizeof(h), item.offset);
     const auto seq = get64(h);
     const auto kind = static_cast<std::uint8_t>(h[8]);
     const auto klen = get32(h + 9), vlen = get32(h + 13);
     if (klen != item.key.size() || seq != item.seq || (kind == kDelete) != item.deleted ||
         (kind != kPut && kind != kDelete) || vlen > kMaxValue) fail("SST index/data mismatch");
     std::string key(klen, '\0'), value(vlen, '\0');
-    preadAll(fd.fd, key.data(), key.size(), item.offset + kSstHead);
-    preadAll(fd.fd, value.data(), value.size(), item.offset + kSstHead + klen);
+    preadAll(fd, key.data(), key.size(), item.offset + kSstHead);
+    preadAll(fd, value.data(), value.size(), item.offset + kSstHead + klen);
     if (key != item.key || get32(h + 17) != crcParts(h, 17, key, value)) fail("SST read CRC mismatch");
     return {seq, kind == kDelete, std::move(value)};
 }
@@ -433,10 +437,60 @@ struct DB::Impl {
         const auto size = fileSize(wal_fd.fd);
         std::uint64_t off = 0, previous = 0;
         while (off < size) {
-            if (size - off < kWalHead) break; // interrupted trailing record header
+            if (size - off < 4) break; // incomplete record magic at the tail
+            char magic[4];
+            preadAll(wal_fd.fd, magic, sizeof(magic), off);
+            if (std::memcmp(magic, "SKB1", 4) == 0) {
+                if (size - off < kBatchHead) break;
+                char bh[kBatchHead];
+                preadAll(wal_fd.fd, bh, sizeof(bh), off);
+                const auto seq = get64(bh + 4);
+                const auto count = get32(bh + 12);
+                const auto payload_len = get32(bh + 16);
+                if (seq == 0 || seq <= previous) fail("batch WAL sequence out of order");
+                if (count == 0 || count > kMaxBatchOperations || payload_len > kMaxBatchBytes ||
+                    static_cast<std::uint64_t>(count) * 9 > payload_len)
+                    fail("invalid WAL batch header");
+                if (size - off - kBatchHead < payload_len) break; // torn batch payload
+                std::string payload(payload_len, '\0');
+                preadAll(wal_fd.fd, payload.data(), payload.size(), off + kBatchHead);
+                std::uint32_t crc = crcUpdate(0xffffffffU, bh + 4, 16);
+                crc = ~crcUpdate(crc, payload.data(), payload.size());
+                if (crc != get32(bh + 20)) fail("WAL batch CRC mismatch");
+                std::vector<std::pair<std::string, Record>> parsed;
+                parsed.reserve(count);
+                std::size_t pos = 0;
+                for (std::uint32_t i = 0; i < count; ++i) {
+                    if (payload.size() - pos < 9) fail("WAL batch record truncated");
+                    const auto kind = static_cast<std::uint8_t>(payload[pos]);
+                    const auto kl = get32(payload.data() + pos + 1);
+                    const auto vl = get32(payload.data() + pos + 5);
+                    pos += 9;
+                    if (kind != kPut && kind != kDelete) fail("invalid WAL batch kind");
+                    checkBounds(kl, vl);
+                    if (kind == kDelete && vl != 0) fail("invalid WAL batch tombstone");
+                    if (static_cast<std::uint64_t>(kl) + vl > payload.size() - pos)
+                        fail("WAL batch record length mismatch");
+                    std::string key(payload.data() + pos, kl);
+                    pos += kl;
+                    std::string val(payload.data() + pos, vl);
+                    pos += vl;
+                    parsed.emplace_back(std::move(key), Record{seq, kind == kDelete, std::move(val)});
+                }
+                if (pos != payload.size()) fail("WAL batch trailing bytes");
+                previous = seq;
+                if (seq > manifest.durable_seq) {
+                    for (auto& item : parsed) setMem(item.first, std::move(item.second));
+                }
+                latest_seq = std::max(latest_seq, seq);
+                off += kBatchHead + payload_len;
+                continue;
+            }
+            if (std::memcmp(magic, "SKW1", 4) != 0)
+                fail("WAL invalid record magic at offset " + std::to_string(off));
+            if (size - off < kWalHead) break; // interrupted legacy record header
             char h[kWalHead];
             preadAll(wal_fd.fd, h, sizeof(h), off);
-            if (std::memcmp(h, "SKW1", 4) != 0) fail("WAL invalid record magic at offset " + std::to_string(off));
             const auto seq = get64(h + 4);
             const auto kind = static_cast<std::uint8_t>(h[12]);
             const auto kl = get32(h + 13), vl = get32(h + 17);
@@ -494,6 +548,49 @@ struct DB::Impl {
             throw;
         }
     }
+    void writeBatch(const std::vector<BatchOperation>& operations) {
+        if (operations.empty()) return;
+        if (operations.size() > kMaxBatchOperations) fail("batch exceeds 4096 operations");
+        std::string payload;
+        for (const auto& op : operations) {
+            const bool is_put = op.type == BatchOperation::Type::Put;
+            if (!is_put && op.type != BatchOperation::Type::Delete) fail("unknown batch operation");
+            checkBounds(op.key.size(), op.value.size());
+            if (!is_put && !op.value.empty()) fail("batch Delete value must be empty");
+            const auto addition = 9U + op.key.size() + op.value.size();
+            if (addition > kMaxBatchBytes - payload.size()) fail("batch exceeds 32 MiB");
+            payload.push_back(static_cast<char>(is_put ? kPut : kDelete));
+            put32(payload, static_cast<std::uint32_t>(op.key.size()));
+            put32(payload, static_cast<std::uint32_t>(op.value.size()));
+            payload += op.key;
+            payload += op.value;
+        }
+        std::lock_guard<std::mutex> guard(mutex);
+        if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
+        if (latest_seq == std::numeric_limits<std::uint64_t>::max()) fail("sequence overflow");
+        const auto seq = latest_seq + 1;
+        std::string header("SKB1", 4);
+        put64(header, seq);
+        put32(header, static_cast<std::uint32_t>(operations.size()));
+        put32(header, static_cast<std::uint32_t>(payload.size()));
+        std::uint32_t crc = crcUpdate(0xffffffffU, header.data() + 4, 16);
+        crc = ~crcUpdate(crc, payload.data(), payload.size());
+        put32(header, crc);
+        try {
+            writeAll(wal_fd.fd, header.data(), header.size());
+            writeAll(wal_fd.fd, payload.data(), payload.size());
+            if (opt.sync_writes) syncFile(wal_fd.fd);
+            maybeCrash("after_batch_wal_sync");
+            latest_seq = seq;
+            for (const auto& op : operations) {
+                setMem(op.key, {seq, op.type == BatchOperation::Type::Delete, op.value});
+            }
+            if (mem_bytes >= opt.memtable_max_bytes) flushLocked();
+        } catch (...) {
+            poisoned = true;
+            throw;
+        }
+    }
     std::optional<std::string> getLocked(const std::string& key) const {
         if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
         if (const auto it = mem.find(key); it != mem.end()) {
@@ -541,6 +638,15 @@ struct DB::Impl {
         if (tables.size() < 2) return;
         const auto id = manifest.next_id;
         SSTWriter writer(dir / sstFilename(id));
+        // Reuse one read descriptor per source SST during this compaction.
+        // Opening a file for every key creates O(records) extra open/close syscalls.
+        std::vector<FD> readers;
+        readers.reserve(tables.size());
+        for (const auto& table : tables) {
+            FD fd(::open(table.path.c_str(), O_RDONLY | O_CLOEXEC));
+            if (fd.fd < 0) fail(err("open compaction source SST"));
+            readers.push_back(std::move(fd));
+        }
         std::priority_queue<SourceEntry, std::vector<SourceEntry>, KeyGreater> pq;
         auto push = [&](std::size_t src, std::size_t pos) {
             const auto& table = tables[src];
@@ -561,7 +667,7 @@ struct DB::Impl {
             // Since all SSTables are merged, no older disk version can be exposed.
             if (!best.deleted) {
                 const auto& tab = tables[best.source - 1];
-                writer.Append(key, readAt(tab, tab.index[best.index]));
+                writer.Append(key, readAt(tab, tab.index[best.index], readers[best.source - 1].fd));
             }
         }
         writer.Finish();
@@ -656,6 +762,7 @@ DB::DB(std::string directory, Options options) : p_(std::make_unique<Impl>(direc
 DB::~DB() = default;
 void DB::Put(const std::string& key, const std::string& value) { p_->mutate(key, value, kPut); }
 void DB::Delete(const std::string& key) { p_->mutate(key, "", kDelete); }
+void DB::WriteBatch(const std::vector<BatchOperation>& operations) { p_->writeBatch(operations); }
 std::optional<std::string> DB::Get(const std::string& key) const {
     checkBounds(key.size(), 0);
     std::lock_guard<std::mutex> lock(p_->mutex);

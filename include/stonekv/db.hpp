@@ -19,6 +19,15 @@ struct Options {
     bool sync_writes = true;  // default: fsync each WAL mutation before returning
 };
 
+// A WriteBatch is atomically replayed from one WAL record.
+// Batch ordering is preserved; the last operation on a repeated key wins.
+struct BatchOperation {
+    enum class Type { Put, Delete };
+    Type type;
+    std::string key;
+    std::string value; // Must be empty for Delete.
+};
+
 struct Stats {
     std::uint64_t latest_sequence = 0;
     std::uint64_t durable_sequence = 0;
@@ -39,6 +48,9 @@ public:
 
     void Put(const std::string& key, const std::string& value);
     void Delete(const std::string& key); // tombstones are durable, even if key does not exist
+    // One durable WAL record for the entire batch; empty batch is a no-op.
+    // Max 4096 operations and 32 MiB encoded payload per batch.
+    void WriteBatch(const std::vector<BatchOperation>& operations);
     std::optional<std::string> Get(const std::string& key) const;
     // Half-open [begin, end). If end=="", scan to the final key.
     // Empty begin scans from the first key. Results are ascending by byte order.

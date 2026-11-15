@@ -14,6 +14,7 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <list>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -424,6 +425,9 @@ struct DB::Impl {
     std::string background_error;
     std::thread flush_worker;
     std::vector<SSTable> tables;
+    // A bounded LRU of descriptors used only under mutex; compaction has its
+    // own short-lived readers. Keeping 32 avoids an unbounded descriptor cost.
+    mutable std::list<std::pair<std::uint64_t, FD>> read_handles;
 
     explicit Impl(const std::string& directory, Options options) : dir(fs::absolute(directory).lexically_normal()), opt(options) {
         if (options.memtable_max_bytes < 1024 || options.compaction_trigger < 2)
@@ -743,9 +747,22 @@ struct DB::Impl {
                 [](const IndexEntry& e, const std::string& k) { return e.key < k; });
             if (pos == idx.end() || pos->key != key) continue;
             if (pos->deleted) return std::nullopt;
-            return readAt(*it, *pos).value;
+            return readAt(*it, *pos, cachedReader(*it)).value;
         }
         return std::nullopt;
+    }
+    int cachedReader(const SSTable& table) const {
+        for (auto it = read_handles.begin(); it != read_handles.end(); ++it) {
+            if (it->first == table.id) {
+                read_handles.splice(read_handles.begin(), read_handles, it);
+                return read_handles.front().second.fd;
+            }
+        }
+        FD fd(::open(table.path.c_str(), O_RDONLY | O_CLOEXEC));
+        if (fd.fd < 0) fail(err("open cached SST"));
+        read_handles.emplace_front(table.id, std::move(fd));
+        if (read_handles.size() > 32) read_handles.pop_back();
+        return read_handles.front().second.fd;
     }
     // Only the worker changes tables and manifest. While it builds the merged
     // SST without the mutex, readers can safely use the unchanged old tables.
@@ -807,6 +824,9 @@ struct DB::Impl {
         manifest = std::move(updated);
         tables.clear();
         tables.push_back(std::move(compacted));
+        read_handles.remove_if([&](const auto& handle) {
+            return std::find(old.begin(), old.end(), handle.first) != old.end();
+        });
         for (auto old_id : old) {
             std::error_code ec;
             fs::remove(dir / sstFilename(old_id), ec);
@@ -901,7 +921,7 @@ struct DB::Impl {
                 if (best.source == 0) result.emplace_back(key, mem_records[best.index].second.value);
                 else {
                     const auto& table = tables[best.source - 1];
-                    result.emplace_back(key, readAt(table, table.index[best.index]).value);
+                    result.emplace_back(key, readAt(table, table.index[best.index], cachedReader(table)).value);
                 }
             }
         }

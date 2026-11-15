@@ -76,7 +76,7 @@ Repeated entry:
     Value          vlen bytes
 ```
 
-每个 SST 文件的键严格递增。启动时扫描 SST 校验 CRC 并重建**所有 key 的内存 offset index**和 Bloom Filter（布隆过滤器并未落盘）。ReadAt 按 offset 读取 Value 并再次验证 CRC。此实现没有 block cache；频繁随机读需要 open/read/close，读密集性能远不及成熟存储引擎。
+每个 SST 文件的键严格递增。启动时扫描 SST 校验 CRC 并重建**所有 key 的内存 offset index**和 Bloom Filter（布隆过滤器并未落盘）。ReadAt 按 offset 读取 Value 并再次验证 CRC。此实现没有 block cache；点查和扫描复用最多32个只读 SST 描述符（LRU），被 Compaction 替换的文件在提交后移除对应缓存句柄。Compaction 构建阶段为各源文件持独立描述符；读密集性能尚需实测且不应类比成熟存储引擎。
 
 ## MANIFEST 格式及事务提交
 

@@ -11,7 +11,7 @@
 | API | ✅ | `Put / Get / Delete / Scan / Flush / Compact / GetStats`，二进制键值 |
 | WAL | ✅ | `SKW1` 记录、单调 seq、CRC32、尾部不完整记录截断；中间 CRC 错误拒绝开启 |
 | 持久化 | ✅ | 默认每次写入后 `fsync(WAL)`；SST 与 MANIFEST 均 `fsync + rename + fsync(dir)` |
-| MemTable | ✅ | `std::map` 有序索引，超过内存阈值同步刷盘 |
+| MemTable | ✅ | `std::map` 有序索引，超过内存阈值冻结并后台刷盘 |
 | SSTable | ✅ | Immutable sorted file，记录级 CRC、内存全量 **key-offset 索引**，按需读取值 |
 | Bloom Filter | ✅ | 每文件内存常驻、约 10 bits/key、7 轮哈希（启动时重建，非持久化） |
 | 读取 / 范围查询 | ✅ | `Get` 从新到旧查；`Scan` 多路有序归并、尊重覆盖与 Tombstone |
@@ -25,7 +25,7 @@
 ## 1.1 工程增强分支说明（待合并）
 
 - `WriteBatch`：在一条 `SKB2` WAL 记录中提交最多 4096 个操作、最多 32 MiB 编码载荷；重放时整批验证 CRC 后才应用。同一键多次操作以最后一次为准。**保证记录重放原子性，不提供快照隔离/MVCC**。
-- 全量 Compaction 使用每个 SST 一个只读文件句柄，避免为每个 key 单独 open/close；尚未在服务器上形成配对性能结论。
+- SST 点查和扫描复用最多32个只读文件句柄（LRU），全量 Compaction 使用每个源 SST 一个独立只读句柄；尚未就此优化形成隔离配对性能结论。
 - 新增 5 个批量写入边界/损坏/崩溃测试，CI 覆盖 GCC/Clang Release 及 GCC ASan/UBSan。
 - 服务器复现实验见 [`docs/SERVER_TASKBOOK.md`](docs/SERVER_TASKBOOK.md) 和 `scripts/server_validation.sh`。
 

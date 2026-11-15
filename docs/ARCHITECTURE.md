@@ -46,17 +46,18 @@
 ## WAL 格式（小端）
 
 ```
-Magic("SKW1")   4 bytes
+Magic("SKW2")   4 bytes
 Sequence       8 bytes
 Kind           1 byte  (1=put,2=delete)
 Key length     4 bytes
 Value length   4 bytes
 CRC32          4 bytes  (覆盖 seq+kind+klen+vlen+key+value)
+Header CRC32   4 bytes  (覆盖 magic 与之前完整头)
 Key            klen bytes
 Value          vlen bytes
 ```
 
-从 offset 0 扫描；不足一个 Header 或 Value 的最后记录视为意外中断，截断尾部后保留前面完整记录；若完整记录校验失败，拒绝启动（避免掩盖磁盘损坏）。
+批量记录使用 `SKB2`，在旧批量头后追加独立头 CRC，批内载荷仍使用原有 CRC 逐批验证。读取支持 `SKW1`/`SKB1` 与 V2 混合，但旧二进制不能读取 V2 WAL；降级前必须先 Flush 并备份。V2 在信任长度前验证完整头 CRC，防止已写入头部长度遭损坏后被误判为撕裂尾部。旧 V1 没有独立头 CRC，无法区分合理长度字段损坏和真正撕裂。所有版本中，完整合法头之后发生的尾部物理截断也无法区分未确认写入的中断和已确认数据被截断；当前策略截断不完整尾部，并不保证检测后者。完整记录 CRC 错误则拒绝启动。
 
 ## SST 格式（小端）
 

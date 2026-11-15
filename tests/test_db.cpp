@@ -148,7 +148,7 @@ void corruptWal() {
     const auto path = t.path / "active.wal";
     int fd = ::open(path.c_str(), O_WRONLY);
     require(fd >= 0, "open WAL for corruption");
-    const char x = 'x'; require(::pwrite(fd, &x, 1, 25) == 1, "inject payload corruption");
+    const char x = 'x'; require(::pwrite(fd, &x, 1, 29) == 1, "inject payload corruption");
     ::close(fd);
     expectThrow([&]{ stonekv::DB bad(t.path.string()); }, "CRC-corrupt WAL must not be silently recovered");
 }
@@ -367,7 +367,7 @@ void batchCorruption() {
     const int fd = ::open(wal.c_str(), O_WRONLY);
     require(fd >= 0, "open batch WAL for corruption");
     const char x = 'z';
-    require(::pwrite(fd, &x, 1, 24 + 9 + 3) == 1, "flip batch payload byte");
+    require(::pwrite(fd, &x, 1, 28 + 9 + 3) == 1, "flip batch payload byte");
     ::close(fd);
     expectThrow([&] { stonekv::DB db(t.path.string()); }, "WAL batch checksum must fail closed");
 }
@@ -392,11 +392,100 @@ void batchCrashReplay() {
     require(!db.Get("third"), "batch tombstone recovered");
     require(db.GetStats().latest_sequence == 1, "batch sequence after crash");
 }
+void walLengthHeaderCorruptionFailsClosed() {
+    using Op = stonekv::BatchOperation;
+    for (bool batch : {false, true}) {
+        Tmp t;
+        {
+            stonekv::DB db(t.path.string());
+            if (batch) db.WriteBatch({{Op::Type::Put, "key", "value"}});
+            else db.Put("key", "value");
+        }
+        const auto wal = t.path / "active.wal";
+        const auto size = fs::file_size(wal);
+        int fd = ::open(wal.c_str(), O_RDWR);
+        require(fd >= 0, "open WAL to corrupt length");
+        const off_t field = batch ? 16 : 17;
+        unsigned char byte = 0;
+        require(::pread(fd, &byte, 1, field) == 1, "read length byte");
+        ++byte; // still within legal range but larger than the actual payload
+        require(::pwrite(fd, &byte, 1, field) == 1, "corrupt length byte");
+        require(::close(fd) == 0, "close WAL");
+        expectThrow([&] { stonekv::DB db(t.path.string()); }, "corrupt WAL length must not be mistaken for torn tail");
+        require(fs::file_size(wal) == size, "corrupt WAL must remain intact for diagnosis");
+    }
+}
+void v2MagicCorruptionFailsClosed() {
+    using Op = stonekv::BatchOperation;
+    for (bool batch : {false, true}) for (char changed : {'X', '1'}) {
+        Tmp t;
+        { stonekv::DB db(t.path.string());
+          if (batch) db.WriteBatch({{Op::Type::Put, "key", "value"}}); else db.Put("key", "value"); }
+        const auto wal = t.path / "active.wal";
+        const auto size = fs::file_size(wal);
+        int fd = ::open(wal.c_str(), O_RDWR);
+        require(fd >= 0, "open WAL magic");
+        require(::pwrite(fd, &changed, 1, 3) == 1, "change V2 magic, including downgrade to V1");
+        require(::close(fd) == 0, "close WAL magic");
+        expectThrow([&] { stonekv::DB db(t.path.string()); }, "corrupted V2 magic must fail closed");
+        require(fs::file_size(wal) == size, "magic-corrupt WAL left intact");
+    }
+}
+void legacyWalMixedVersionReplay() {
+    // Construct V1 records independently so compatibility does not depend on the V2 writer.
+    auto u32 = [](std::string& s, std::uint32_t x) { for (int i = 0; i != 4; ++i) s.push_back(static_cast<char>((x >> (8 * i)) & 255U)); };
+    auto u64 = [](std::string& s, std::uint64_t x) { for (int i = 0; i != 8; ++i) s.push_back(static_cast<char>((x >> (8 * i)) & 255U)); };
+    auto crc = [](const std::string& s) {
+        std::uint32_t x = 0xffffffffU;
+        for (unsigned char c : s) {
+            x ^= c;
+            for (int i = 0; i != 8; ++i) x = (x >> 1U) ^ ((x & 1U) ? 0xedb88320U : 0U);
+        }
+        return ~x;
+    };
+    Tmp t;
+    { stonekv::DB db(t.path.string()); }
+    std::string legacy("SKW1", 4), h;
+    u64(h, 1); h.push_back(1); u32(h, 3); u32(h, 3);
+    legacy += h; u32(legacy, crc(h + "oldone")); legacy += "oldone";
+    std::string payload; payload.push_back(1); u32(payload, 3); u32(payload, 3); payload += "newtwo";
+    std::string bh; u64(bh, 2); u32(bh, 1); u32(bh, static_cast<std::uint32_t>(payload.size()));
+    legacy += "SKB1"; legacy += bh; u32(legacy, crc(bh + payload)); legacy += payload;
+    { std::ofstream f(t.path / "active.wal", std::ios::binary | std::ios::trunc); f.write(legacy.data(), static_cast<std::streamsize>(legacy.size())); require(bool(f), "write V1 fixture"); }
+    { stonekv::DB db(t.path.string()); require(db.Get("old") == "one" && db.Get("new") == "two", "V1 replay"); db.Put("v2", "three"); }
+    { stonekv::DB db(t.path.string()); require(db.Get("old") == "one" && db.Get("new") == "two" && db.Get("v2") == "three", "mixed V1/V2 replay"); }
+}
+void v2IncompleteTailPreservesPriorRecord() {
+    using Op = stonekv::BatchOperation;
+    for (bool batch : {false, true}) {
+        Tmp source, target;
+        std::uint64_t offset = 0;
+        {
+            stonekv::DB db(source.path.string()); db.Put("safe", "yes"); offset = db.GetStats().wal_bytes;
+            if (batch) db.WriteBatch({{Op::Type::Put, "pending", "value"}});
+            else db.Put("pending", "value");
+        }
+        { stonekv::DB db(target.path.string()); db.Put("safe", "yes"); }
+        const auto wal = target.path / "active.wal";
+        require(fs::file_size(wal) == offset, "matching record prefix");
+        std::ifstream f(source.path / "active.wal", std::ios::binary);
+        f.seekg(static_cast<std::streamoff>(offset));
+        std::string record((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        require(record.size() > 30, "complete V2 source record");
+        record.pop_back();
+        { std::ofstream out(wal, std::ios::binary | std::ios::app); out.write(record.data(), static_cast<std::streamsize>(record.size())); require(bool(out), "append incomplete record"); }
+        { stonekv::DB db(target.path.string()); require(db.Get("safe") == "yes" && !db.Get("pending"), "incomplete tail replay"); require(db.GetStats().wal_bytes == offset, "incomplete tail truncated"); }
+    }
+}
 } // namespace
 
 int main() {
     using Test = std::pair<const char*, std::function<void()>>;
     const std::vector<Test> tests{
+        {"wal_length_header_corruption_fails_closed", walLengthHeaderCorruptionFailsClosed},
+        {"v2_magic_corruption_fails_closed", v2MagicCorruptionFailsClosed},
+        {"legacy_wal_mixed_version_replay", legacyWalMixedVersionReplay},
+        {"v2_incomplete_tail_preserves_prior_record", v2IncompleteTailPreservesPriorRecord},
         {"basic_and_reopen", basic}, {"binary_values", binaryValues}, {"ordered_scan", scan},
         {"flush_and_reopen", flushReopen}, {"compaction_and_tombstones", compaction},
         {"auto_compaction", automaticCompaction}, {"input_and_exclusive_lock", validationAndLock},

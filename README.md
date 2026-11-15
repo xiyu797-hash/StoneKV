@@ -22,7 +22,7 @@
 
 ## 1.1 工程增强分支说明（待合并）
 
-- `WriteBatch`：在一条 `SKB1` WAL 记录中提交最多 4096 个操作、最多 32 MiB 编码载荷；重放时整批验证 CRC 后才应用。同一键多次操作以最后一次为准。**保证记录重放原子性，不提供快照隔离/MVCC**。
+- `WriteBatch`：在一条 `SKB2` WAL 记录中提交最多 4096 个操作、最多 32 MiB 编码载荷；重放时整批验证 CRC 后才应用。同一键多次操作以最后一次为准。**保证记录重放原子性，不提供快照隔离/MVCC**。
 - 全量 Compaction 使用每个 SST 一个只读文件句柄，避免为每个 key 单独 open/close；尚未在服务器上形成配对性能结论。
 - 新增 5 个批量写入边界/损坏/崩溃测试，CI 覆盖 GCC/Clang Release 及 GCC ASan/UBSan。
 - 服务器复现实验见 [`docs/SERVER_TASKBOOK.md`](docs/SERVER_TASKBOOK.md) 和 `scripts/server_validation.sh`。
@@ -108,6 +108,7 @@ data/
 - Key 1..4096 bytes；Value 0..8 MiB；支持 `\0`、二进制字节，空 value 与 NotFound 严格区分。
 - `Scan(begin,end,limit)` 按字节序升序返回半开区间 `[begin,end)`；`end=""` 表示不设置上界；默认上限 100，最大 100000。
 - `Delete` 写 Tombstone，并不会立即移除文件里的旧值；全量 Compaction 安全删除被覆盖旧版本。
+- 新写入使用 `SKW2`/`SKB2`，头部有独立 CRC；可重放旧版 `SKW1`/`SKB1`。旧二进制无法读取包含 V2 记录的 WAL，降级前必须先完成 Flush 并备份。旧 V1 的长度损坏与未完成尾部不可可靠区分；即使 V2 的头完整，已确认数据后续被物理截断与未确认写入的撕裂尾部也不可仅凭该格式区分。
 - 若打开时发现 WAL **尾部不完整**，只截断最后不完整片段；已完整的记录 CRC 错误则抛异常，**不静默跳过**。SST CRC 错误亦拒绝打开。
 - 操作返回成功时：默认 `sync_writes=true` 表示 WAL 已 `fsync`，但并非跨设备/主机复制或断电级别的全系统保证。
 - `sync_writes=false` 适合基准测试/临时数据，不提供每次操作的可靠落盘确认。`Flush()` 成功会确保此前的 MemTable 已持久化。

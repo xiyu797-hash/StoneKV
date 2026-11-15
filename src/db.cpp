@@ -36,6 +36,8 @@ constexpr std::size_t kMaxKey = 4096;
 constexpr std::size_t kMaxValue = 8U * 1024U * 1024U;
 constexpr std::size_t kWalHead = 25; // magic4 seq8 kind1 keylen4 vallen4 crc4
 constexpr std::size_t kBatchHead = 24; // magic4 seq8 count4 payloadlen4 crc4
+constexpr std::size_t kWalV2Head = kWalHead + 4; // V1 fields + CRC32 of complete V1-sized header
+constexpr std::size_t kBatchV2Head = kBatchHead + 4;
 constexpr std::size_t kMaxBatchOperations = 4096;
 constexpr std::size_t kMaxBatchBytes = 32U * 1024U * 1024U;
 constexpr std::size_t kSstHead = 21; // seq8 kind1 keylen4 vallen4 crc4
@@ -450,10 +452,14 @@ struct DB::Impl {
             if (size - off < 4) break; // incomplete record magic at the tail
             char magic[4];
             preadAll(wal_fd.fd, magic, sizeof(magic), off);
-            if (std::memcmp(magic, "SKB1", 4) == 0) {
-                if (size - off < kBatchHead) break;
-                char bh[kBatchHead];
-                preadAll(wal_fd.fd, bh, sizeof(bh), off);
+            const bool batch_v2 = std::memcmp(magic, "SKB2", 4) == 0;
+            if (batch_v2 || std::memcmp(magic, "SKB1", 4) == 0) {
+                const auto header_size = batch_v2 ? kBatchV2Head : kBatchHead;
+                if (size - off < header_size) break;
+                char bh[kBatchV2Head];
+                preadAll(wal_fd.fd, bh, header_size, off);
+                if (batch_v2 && crc32(std::string(bh, kBatchHead)) != get32(bh + kBatchHead))
+                    fail("WAL batch header CRC mismatch");
                 const auto seq = get64(bh + 4);
                 const auto count = get32(bh + 12);
                 const auto payload_len = get32(bh + 16);
@@ -461,9 +467,9 @@ struct DB::Impl {
                 if (count == 0 || count > kMaxBatchOperations || payload_len > kMaxBatchBytes ||
                     static_cast<std::uint64_t>(count) * 9 > payload_len)
                     fail("invalid WAL batch header");
-                if (size - off - kBatchHead < payload_len) break; // torn batch payload
+                if (size - off - header_size < payload_len) break; // torn batch payload
                 std::string payload(payload_len, '\0');
-                preadAll(wal_fd.fd, payload.data(), payload.size(), off + kBatchHead);
+                preadAll(wal_fd.fd, payload.data(), payload.size(), off + header_size);
                 std::uint32_t crc = crcUpdate(0xffffffffU, bh + 4, 16);
                 crc = ~crcUpdate(crc, payload.data(), payload.size());
                 if (crc != get32(bh + 20)) fail("WAL batch CRC mismatch");
@@ -493,30 +499,34 @@ struct DB::Impl {
                     for (auto& item : parsed) setMem(item.first, std::move(item.second));
                 }
                 latest_seq = std::max(latest_seq, seq);
-                off += kBatchHead + payload_len;
+                off += header_size + payload_len;
                 continue;
             }
-            if (std::memcmp(magic, "SKW1", 4) != 0)
+            const bool wal_v2 = std::memcmp(magic, "SKW2", 4) == 0;
+            if (!wal_v2 && std::memcmp(magic, "SKW1", 4) != 0)
                 fail("WAL invalid record magic at offset " + std::to_string(off));
-            if (size - off < kWalHead) break; // interrupted legacy record header
-            char h[kWalHead];
-            preadAll(wal_fd.fd, h, sizeof(h), off);
+            const auto header_size = wal_v2 ? kWalV2Head : kWalHead;
+            if (size - off < header_size) break; // interrupted record header
+            char h[kWalV2Head];
+            preadAll(wal_fd.fd, h, header_size, off);
+            if (wal_v2 && crc32(std::string(h, kWalHead)) != get32(h + kWalHead))
+                fail("WAL header CRC mismatch at offset " + std::to_string(off));
             const auto seq = get64(h + 4);
             const auto kind = static_cast<std::uint8_t>(h[12]);
             const auto kl = get32(h + 13), vl = get32(h + 17);
             if (kind != kPut && kind != kDelete) fail("WAL invalid kind at offset " + std::to_string(off));
             checkBounds(kl, vl);
             if (seq == 0 || seq <= previous) fail("WAL sequence out of order");
-            if (size - off - kWalHead < static_cast<std::uint64_t>(kl) + vl) break; // interrupted payload
+            if (size - off - header_size < static_cast<std::uint64_t>(kl) + vl) break; // interrupted payload
             std::string key(kl, '\0'), val(vl, '\0');
-            preadAll(wal_fd.fd, key.data(), key.size(), off + kWalHead);
-            preadAll(wal_fd.fd, val.data(), val.size(), off + kWalHead + kl);
+            preadAll(wal_fd.fd, key.data(), key.size(), off + header_size);
+            preadAll(wal_fd.fd, val.data(), val.size(), off + header_size + kl);
             if (crcParts(h + 4, 17, key, val) != get32(h + 21))
                 fail("WAL CRC mismatch at offset " + std::to_string(off));
             previous = seq;
             if (seq > manifest.durable_seq) setMem(key, {seq, kind == kDelete, std::move(val)});
             latest_seq = std::max(latest_seq, seq);
-            off += kWalHead + static_cast<std::uint64_t>(kl) + vl;
+            off += header_size + static_cast<std::uint64_t>(kl) + vl;
         }
         if (off != size) truncateFile(wal_fd.fd, off); // only incomplete trailing record truncated
         if (::lseek(wal_fd.fd, 0, SEEK_END) < 0) fail(err("lseek WAL"));
@@ -528,12 +538,13 @@ struct DB::Impl {
         mem[key] = std::move(record);
     }
     void appendWal(const std::string& key, const std::string& val, std::uint8_t kind, std::uint64_t seq) {
-        std::string h("SKW1", 4);
+        std::string h("SKW2", 4);
         put64(h, seq);
         h.push_back(static_cast<char>(kind));
         put32(h, static_cast<std::uint32_t>(key.size()));
         put32(h, static_cast<std::uint32_t>(val.size()));
         put32(h, crcParts(h.data() + 4, 17, key, val));
+        put32(h, crc32(h));
         // A single writer is protected by mutex; position is EOF after replay/truncate.
         writeAll(wal_fd.fd, h.data(), h.size());
         writeAll(wal_fd.fd, key.data(), key.size());
@@ -579,13 +590,14 @@ struct DB::Impl {
         if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
         if (latest_seq == std::numeric_limits<std::uint64_t>::max()) fail("sequence overflow");
         const auto seq = latest_seq + 1;
-        std::string header("SKB1", 4);
+        std::string header("SKB2", 4);
         put64(header, seq);
         put32(header, static_cast<std::uint32_t>(operations.size()));
         put32(header, static_cast<std::uint32_t>(payload.size()));
         std::uint32_t crc = crcUpdate(0xffffffffU, header.data() + 4, 16);
         crc = ~crcUpdate(crc, payload.data(), payload.size());
         put32(header, crc);
+        put32(header, crc32(header));
         try {
             writeAll(wal_fd.fd, header.data(), header.size());
             writeAll(wal_fd.fd, payload.data(), payload.size());

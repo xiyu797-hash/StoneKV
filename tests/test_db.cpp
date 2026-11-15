@@ -10,8 +10,11 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iomanip>
+#include <limits>
 #include <map>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -189,6 +192,41 @@ void manifestTrailingGarbageFailsClosed() {
     { stonekv::DB db(t.path.string()); db.Put("key", "value"); db.Flush(); }
     { std::ofstream out(t.path / "MANIFEST", std::ios::app | std::ios::binary); out << "garbage\n"; }
     expectThrow([&] { stonekv::DB db(t.path.string()); }, "MANIFEST trailing garbage");
+}
+void exhaustedSstIdFailsClosed() {
+    // Construct a checksummed MANIFEST fixture, so errors cannot be attributed
+    // to the parser rejecting an intentionally damaged checksum.
+    auto rewrite = [](const fs::path& dir, std::uint64_t durable, const std::vector<std::uint64_t>& ids) {
+        std::ostringstream body;
+        body << "STONEKV_MANIFEST_V1\n" << durable << ' ' << std::numeric_limits<std::uint64_t>::max() << ' ' << ids.size() << '\n';
+        for (auto id : ids) body << id << '\n';
+        const std::string content = body.str();
+        std::uint32_t crc = 0xffffffffU;
+        for (unsigned char c : content) { crc ^= c; for (int i = 0; i != 8; ++i) crc = (crc >> 1U) ^ ((crc & 1U) ? 0xedb88320U : 0U); }
+        std::ofstream out(dir / "MANIFEST", std::ios::binary | std::ios::trunc);
+        out << content << "crc32 " << std::hex << std::setw(8) << std::setfill('0') << ~crc << '\n';
+        require(bool(out), "write valid exhausted-id MANIFEST fixture");
+    };
+    for (bool compact : {false, true}) {
+        Tmp t;
+        {
+            stonekv::DB db(t.path.string(), opt(1024 * 1024, 100));
+            db.Put("ack", "value");
+            if (compact) { db.Flush(); db.Put("second", "value2"); db.Flush(); }
+        }
+        rewrite(t.path, compact ? 2 : 0, compact ? std::vector<std::uint64_t>{1, 2} : std::vector<std::uint64_t>{});
+        const auto manifest_before = fs::file_size(t.path / "MANIFEST");
+        const auto wal_before = fs::file_size(t.path / "active.wal");
+        {
+            stonekv::DB db(t.path.string(), opt(1024 * 1024, 100));
+            require(db.Get("ack") == "value", "fixture opens and ACK is readable");
+            if (compact) expectThrow([&] { db.Compact(); }, "compaction must reject exhausted SST id");
+            else expectThrow([&] { db.Flush(); }, "flush must reject exhausted SST id");
+        }
+        require(fs::file_size(t.path / "MANIFEST") == manifest_before && fs::file_size(t.path / "active.wal") == wal_before, "exhaustion must not publish or truncate");
+        require(!fs::exists(t.path / "SST-18446744073709551615.sst") && !fs::exists(t.path / "SST-18446744073709551615.sst.tmp"), "exhaustion must fail before creating SST");
+        { stonekv::DB db(t.path.string()); require(db.Get("ack") == "value", "acknowledged value survives exhaustion"); if (compact) require(db.Get("second") == "value2", "second SST survives exhaustion"); }
+    }
 }
 void maxKeyAndLimit() {
     Tmp t;
@@ -486,6 +524,7 @@ int main() {
         {"v2_magic_corruption_fails_closed", v2MagicCorruptionFailsClosed},
         {"legacy_wal_mixed_version_replay", legacyWalMixedVersionReplay},
         {"v2_incomplete_tail_preserves_prior_record", v2IncompleteTailPreservesPriorRecord},
+        {"exhausted_sst_id_fails_closed", exhaustedSstIdFailsClosed},
         {"basic_and_reopen", basic}, {"binary_values", binaryValues}, {"ordered_scan", scan},
         {"flush_and_reopen", flushReopen}, {"compaction_and_tombstones", compaction},
         {"auto_compaction", automaticCompaction}, {"input_and_exclusive_lock", validationAndLock},

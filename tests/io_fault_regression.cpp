@@ -17,14 +17,18 @@
 namespace fs = std::filesystem;
 namespace {
 struct Injection { bool active=false, seen=false; std::string path_part; int error=0; bool on_sync=false; bool partial=false, waiting=false, dir_only=false; int skip=0; } inj;
-bool targets(int fd) {
-    char link[64],path[4096];
+bool trace_dirs = false;
+std::vector<std::string> synced_dirs;
+std::string fdPath(int fd) {
+    char link[64], path[4096];
     std::snprintf(link,sizeof(link),"/proc/self/fd/%d",fd);
     const auto n=::readlink(link,path,sizeof(path)-1);
-    if(n<0)return false;
-    path[n]='\0';
+    if(n<0)return {};
+    path[n]='\0'; return path;
+}
+bool targets(int fd) {
     struct stat st{};
-    return std::string(path).find(inj.path_part)!=std::string::npos &&
+    return fdPath(fd).find(inj.path_part)!=std::string::npos &&
            (!inj.dir_only || (::fstat(fd,&st)==0 && S_ISDIR(st.st_mode)));
 }
 void check(bool b,const std::string& message) { if(!b)throw std::runtime_error(message); }
@@ -44,6 +48,8 @@ extern "C" ssize_t __wrap_write(int fd,const void* data,size_t size) {
     return __real_write(fd,data,size);
 }
 extern "C" int __wrap_fsync(int fd) {
+    struct stat st{};
+    if(trace_dirs && ::fstat(fd,&st)==0 && S_ISDIR(st.st_mode)) synced_dirs.push_back(fdPath(fd));
     if(inj.active && !inj.seen && inj.on_sync && targets(fd)) {
         if(inj.skip>0) --inj.skip; else { inj.seen=true; errno=inj.error; return -1; }
     }
@@ -61,6 +67,28 @@ int main(int argc,char** argv) {
       std::vector<char> buffer(pattern.begin(),pattern.end()); buffer.push_back('\0');
       const char* created=::mkdtemp(buffer.data());
       check(created!=nullptr,"cannot create unique fixture directory"); base=created;
+    }
+    {
+      const auto root=base/"directory_order";
+      const auto nested=root/"nested"/"database";
+      synced_dirs.clear(); trace_dirs=true;
+      { stonekv::DB db(nested.string()); db.Put("ack","value"); }
+      trace_dirs=false;
+      check(synced_dirs.size()>=3,"missing ancestor fsync calls");
+      check(synced_dirs[0]==base.string() && synced_dirs[1]==root.string() && synced_dirs[2]==(root/"nested").string(),"new directory entries not synced parent-first");
+      { stonekv::DB reopened(nested.string()); check(reopened.Get("ack")=="value","nested database reopen"); }
+      std::cout<<"PASS nested directory parent fsync order\n";
+    }
+    {
+      const auto parent=base/"directory_fsync_failure";
+      synced_dirs.clear(); trace_dirs=true;
+      inj={true,false,base.string(),EIO,true,false,false,true,0};
+      must_throw([&]{stonekv::DB db((parent/"nested"/"database").string());},"ancestor directory fsync failure");
+      inj.active=false; trace_dirs=false;
+      check(inj.seen,"ancestor fsync injection not reached");
+      check(!synced_dirs.empty() && synced_dirs.front()==base.string(),"error must be on first newly-created directory parent");
+      check(!fs::exists(parent/"nested"),"failure before descendant creation");
+      std::cout<<"PASS ancestor directory fsync EIO propagated\n";
     }
     const std::vector<Case> cases={
       {"wal_write_enospc","active.wal",ENOSPC,false,false},

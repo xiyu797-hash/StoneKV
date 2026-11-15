@@ -105,6 +105,18 @@ void syncDir(const fs::path& path) {
     if (fd.fd < 0) fail(err("open directory"));
     syncFile(fd.fd);
 }
+// Persist each newly created directory entry before creating its descendants.
+void createDirectoriesDurably(const fs::path& path) {
+    fs::path current = path.root_path();
+    for (const auto& component : path.relative_path()) {
+        current /= component;
+        std::error_code ec;
+        const bool created = fs::create_directory(current, ec);
+        if (ec) fail("create directory " + current.string() + ": " + ec.message());
+        if (created) syncDir(current.parent_path());
+        else if (!fs::is_directory(current)) fail("database path contains a non-directory");
+    }
+}
 std::uint64_t fileSize(int fd) {
     struct stat st{};
     if (::fstat(fd, &st) != 0) fail(err("fstat"));
@@ -398,10 +410,10 @@ struct DB::Impl {
     std::size_t mem_bytes{0};
     std::vector<SSTable> tables;
 
-    explicit Impl(const std::string& directory, Options options) : dir(fs::absolute(directory)), opt(options) {
+    explicit Impl(const std::string& directory, Options options) : dir(fs::absolute(directory).lexically_normal()), opt(options) {
         if (options.memtable_max_bytes < 1024 || options.compaction_trigger < 2)
             fail("memtable_max_bytes must be >=1024 and compaction_trigger >=2");
-        fs::create_directories(dir);
+        createDirectoriesDurably(dir);
         lock_fd = FD(::open((dir / "LOCK").c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644));
         if (lock_fd.fd < 0) fail(err("open LOCK"));
         if (::flock(lock_fd.fd, LOCK_EX | LOCK_NB) != 0) fail("database already open by another process");
@@ -634,6 +646,7 @@ struct DB::Impl {
     void flushLocked() {
         if (mem.empty()) return;
         const auto id = manifest.next_id;
+        if (id == std::numeric_limits<std::uint64_t>::max()) fail("SST file id exhausted");
         SSTWriter writer(dir / sstFilename(id));
         // 先写 SST.tmp 并 fsync，再 rename；MANIFEST 提交之前不能截断 WAL。
         for (const auto& kv : mem) writer.Append(kv.first, kv.second);
@@ -659,6 +672,7 @@ struct DB::Impl {
     void compactLocked() {
         if (tables.size() < 2) return;
         const auto id = manifest.next_id;
+        if (id == std::numeric_limits<std::uint64_t>::max()) fail("SST file id exhausted");
         SSTWriter writer(dir / sstFilename(id));
         // Reuse one read descriptor per source SST during this compaction.
         // Opening a file for every key creates O(records) extra open/close syscalls.

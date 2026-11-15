@@ -1,0 +1,5 @@
+[PASS] wal_length_header_corruption_fails_closed
+[PASS] v2_magic_corruption_fails_closed
+[PASS] legacy_wal_mixed_version_replay
+[PASS] v2_incomplete_tail_preserves_prior_record
+[FAIL] exhausted_sst_id_fails_closed : expected exception: flush must reject exhausted SST id

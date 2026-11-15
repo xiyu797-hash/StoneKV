@@ -351,6 +351,8 @@ Manifest readManifest(const fs::path& dir) {
     std::istringstream check(data.substr(pos + 6));
     std::uint32_t expected = 0;
     if (!(check >> std::hex >> expected) || expected != crc32(payload)) fail("MANIFEST checksum mismatch");
+    check >> std::ws;
+    if (!check.eof()) fail("MANIFEST has trailing data after checksum");
     std::istringstream ss(payload);
     std::string magic;
     Manifest m;
@@ -403,6 +405,10 @@ struct DB::Impl {
         if (::flock(lock_fd.fd, LOCK_EX | LOCK_NB) != 0) fail("database already open by another process");
         if (fs::exists(dir / "MANIFEST")) {
             manifest = readManifest(dir);
+            // An existing database must retain its WAL name even when empty.
+            // Recreating a missing WAL would silently discard acknowledged writes.
+            wal_fd = FD(::open((dir / "active.wal").c_str(), O_RDWR | O_CLOEXEC));
+            if (wal_fd.fd < 0) fail(err("open existing WAL"));
         } else {
             // Do not silently overwrite an existing store if MANIFEST disappeared.
             bool foreign_data = false;
@@ -410,12 +416,16 @@ struct DB::Impl {
                 if (entry.path().filename() != "LOCK") { foreign_data = true; break; }
             }
             if (foreign_data) fail("MANIFEST missing from non-empty directory; refusing new DB");
+            // Publish and persist the WAL directory entry before publishing the
+            // MANIFEST, so a successfully initialized store always has a WAL.
+            wal_fd = FD(::open((dir / "active.wal").c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644));
+            if (wal_fd.fd < 0) fail(err("create WAL"));
+            syncFile(wal_fd.fd);
+            syncDir(dir);
             saveManifest(dir, manifest);
         }
         latest_seq = manifest.durable_seq;
         for (auto id : manifest.files) tables.push_back(loadSST(dir / sstFilename(id), id));
-        wal_fd = FD(::open((dir / "active.wal").c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644));
-        if (wal_fd.fd < 0) fail(err("open WAL"));
         replayWal();
         // Under the process lock, unreferenced SST and interrupted tmp writes are safe to discard.
         std::unordered_set<std::string> retained;

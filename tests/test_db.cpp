@@ -177,6 +177,19 @@ void corruptManifest() {
     ::close(fd);
     expectThrow([&] { stonekv::DB db(t.path.string()); }, "invalid MANIFEST CRC");
 }
+void missingWalFailsClosed() {
+    Tmp t;
+    { stonekv::DB db(t.path.string()); db.Put("acknowledged", "value"); }
+    require(fs::remove(t.path / "active.wal"), "remove existing WAL");
+    expectThrow([&] { stonekv::DB db(t.path.string()); }, "missing WAL must not silently lose acknowledged data");
+    require(!fs::exists(t.path / "active.wal"), "missing WAL must not be recreated");
+}
+void manifestTrailingGarbageFailsClosed() {
+    Tmp t;
+    { stonekv::DB db(t.path.string()); db.Put("key", "value"); db.Flush(); }
+    { std::ofstream out(t.path / "MANIFEST", std::ios::app | std::ios::binary); out << "garbage\n"; }
+    expectThrow([&] { stonekv::DB db(t.path.string()); }, "MANIFEST trailing garbage");
+}
 void maxKeyAndLimit() {
     Tmp t;
     stonekv::DB db(t.path.string());
@@ -390,6 +403,8 @@ int main() {
         {"torn_wal_tail", tornWalTail}, {"corrupt_wal_fails_closed", corruptWal},
         {"corrupt_sst_fails_closed", corruptSst}, {"missing_manifest_fails_closed", missingManifest},
         {"corrupt_manifest_fails_closed", corruptManifest},
+        {"manifest_trailing_garbage_fails_closed", manifestTrailingGarbageFailsClosed},
+        {"missing_wal_fails_closed", missingWalFailsClosed},
         {"max_key_edge", maxKeyAndLimit},
         {"reopen_sequence_overwrite", reopenedSequenceAndOverwrite},
         {"cross_process_exclusive_lock", crossProcessLock},

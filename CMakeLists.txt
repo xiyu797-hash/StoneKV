@@ -18,6 +18,8 @@ target_link_libraries(stonekv_cli PRIVATE stonekv)
 add_executable(stonekv_bench tools/bench.cpp)
 target_link_libraries(stonekv_bench PRIVATE stonekv)
 find_package(Threads REQUIRED)
+add_executable(stonekv_benchmark_workloads tools/benchmark_workloads.cpp)
+target_link_libraries(stonekv_benchmark_workloads PRIVATE stonekv Threads::Threads)
 
 if(STONEKV_BUILD_TESTS)
   enable_testing()

@@ -1,0 +1,1 @@
+Binary compiled with tools/benchmark_workloads.cpp and original git archive commit 2318bb65bc0d13b562dc1cee755355e6690c142f src/db.cpp using g++ -std=c++17 -O3 -DNDEBUG -pthread. The environment.json git_head refers to the runner checkout, not the linked baseline source. Server shared; preliminary small baseline.

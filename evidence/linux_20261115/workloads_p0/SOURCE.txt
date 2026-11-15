@@ -1,0 +1,1 @@
+Binary built from 09eb620 plus benchmark files, GCC 13.3 CMake Release. Three rounds, 200 keys, seed 42, 4 threads, modes separate; shared host.

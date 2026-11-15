@@ -1,0 +1,18 @@
+# One-run LOCAL measurement, not a cross-host benchmark or a stable performance guarantee.
+# fresh directories, container filesystem, sync=0 is not durable ACK.
+# StoneKV v1 Linux benchmark; release build recommended
+# count=6000 value_bytes=128 sync_writes=0 seed=42
+operation,count,elapsed_ms,ops_per_sec
+put,6000,32.935,182174.82
+flush,1,2.753,NA
+random_get,6000,18.926,317028.96
+full_compact,1,35.867,NA
+# sstables=1 memtable_entries=0
+# StoneKV v1 Linux benchmark; release build recommended
+# count=400 value_bytes=128 sync_writes=1 seed=42
+operation,count,elapsed_ms,ops_per_sec
+put,400,84.113,4755.53
+flush,1,3.233,NA
+random_get,400,1.062,376636.49
+# full_compact skipped (fewer than 2 SSTables)
+# sstables=1 memtable_entries=0

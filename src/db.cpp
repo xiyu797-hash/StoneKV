@@ -1,0 +1,671 @@
+#include "stonekv/db.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cerrno>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iomanip>
+#include <limits>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <queue>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+namespace stonekv {
+namespace {
+namespace fs = std::filesystem;
+constexpr std::size_t kMaxKey = 4096;
+constexpr std::size_t kMaxValue = 8U * 1024U * 1024U;
+constexpr std::size_t kWalHead = 25; // magic4 seq8 kind1 keylen4 vallen4 crc4
+constexpr std::size_t kSstHead = 21; // seq8 kind1 keylen4 vallen4 crc4
+constexpr const char* kSstMagic = "STONEKV1"; // 8 bytes
+constexpr const char* kManifestMagic = "STONEKV_MANIFEST_V1";
+constexpr std::uint8_t kPut = 1;
+constexpr std::uint8_t kDelete = 2;
+
+[[noreturn]] void fail(const std::string& why) { throw std::runtime_error("StoneKV: " + why); }
+std::string err(const std::string& where) { return where + ": " + std::strerror(errno); }
+
+struct FD {
+    int fd{-1};
+    explicit FD(int n = -1) : fd(n) {}
+    ~FD() { if (fd >= 0) ::close(fd); }
+    FD(const FD&) = delete;
+    FD& operator=(const FD&) = delete;
+    FD(FD&& other) noexcept : fd(std::exchange(other.fd, -1)) {}
+    FD& operator=(FD&& other) noexcept {
+        if (this != &other) {
+            if (fd >= 0) ::close(fd);
+            fd = std::exchange(other.fd, -1);
+        }
+        return *this;
+    }
+};
+
+void writeAll(int fd, const void* data, std::size_t size) {
+    const auto* ptr = static_cast<const unsigned char*>(data);
+    while (size != 0) {
+        const ssize_t n = ::write(fd, ptr, size);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) fail(err("write"));
+        ptr += n;
+        size -= static_cast<std::size_t>(n);
+    }
+}
+
+void preadAll(int fd, void* data, std::size_t size, std::uint64_t off) {
+    auto* ptr = static_cast<unsigned char*>(data);
+    while (size != 0) {
+        const auto n = ::pread(fd, ptr, size, static_cast<off_t>(off));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) fail(n == 0 ? "unexpected EOF" : err("pread"));
+        ptr += n;
+        size -= static_cast<std::size_t>(n);
+        off += static_cast<std::uint64_t>(n);
+    }
+}
+
+void pwriteAll(int fd, const void* data, std::size_t size, std::uint64_t off) {
+    const auto* ptr = static_cast<const unsigned char*>(data);
+    while (size != 0) {
+        const auto n = ::pwrite(fd, ptr, size, static_cast<off_t>(off));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) fail(err("pwrite"));
+        ptr += n;
+        size -= static_cast<std::size_t>(n);
+        off += static_cast<std::uint64_t>(n);
+    }
+}
+void syncFile(int fd) { if (::fsync(fd) < 0) fail(err("fsync")); }
+void syncDir(const fs::path& path) {
+    FD fd(::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    if (fd.fd < 0) fail(err("open directory"));
+    syncFile(fd.fd);
+}
+std::uint64_t fileSize(int fd) {
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) fail(err("fstat"));
+    if (st.st_size < 0) fail("negative file size");
+    return static_cast<std::uint64_t>(st.st_size);
+}
+void truncateFile(int fd, std::uint64_t len) {
+    if (::ftruncate(fd, static_cast<off_t>(len)) != 0) fail(err("ftruncate"));
+    syncFile(fd);
+}
+void put32(std::string& s, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) s.push_back(static_cast<char>((v >> (8 * i)) & 0xffU));
+}
+void put64(std::string& s, std::uint64_t v) {
+    for (int i = 0; i < 8; ++i) s.push_back(static_cast<char>((v >> (8 * i)) & 0xffU));
+}
+std::uint32_t get32(const char* p) {
+    std::uint32_t v = 0;
+    for (int i = 0; i < 4; ++i) v |= static_cast<std::uint32_t>(static_cast<unsigned char>(p[i])) << (8 * i);
+    return v;
+}
+std::uint64_t get64(const char* p) {
+    std::uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v |= static_cast<std::uint64_t>(static_cast<unsigned char>(p[i])) << (8 * i);
+    return v;
+}
+
+const std::array<std::uint32_t, 256>& crcTable() {
+    static const auto table = [] {
+        std::array<std::uint32_t, 256> t{};
+        for (std::uint32_t i = 0; i < 256; ++i) {
+            std::uint32_t v = i;
+            for (int j = 0; j < 8; ++j) v = (v >> 1U) ^ ((v & 1U) ? 0xedb88320U : 0U);
+            t[i] = v;
+        }
+        return t;
+    }();
+    return table;
+}
+std::uint32_t crcUpdate(std::uint32_t crc, const void* data, std::size_t len) {
+    const auto* p = static_cast<const unsigned char*>(data);
+    const auto& t = crcTable();
+    for (std::size_t i = 0; i < len; ++i) crc = t[(crc ^ p[i]) & 0xffU] ^ (crc >> 8U);
+    return crc;
+}
+std::uint32_t crc32(const std::string& data) {
+    return ~crcUpdate(0xffffffffU, data.data(), data.size());
+}
+std::uint32_t crcParts(const char* h, std::size_t hlen, const std::string& k, const std::string& v) {
+    std::uint32_t c = crcUpdate(0xffffffffU, h, hlen);
+    c = crcUpdate(c, k.data(), k.size());
+    c = crcUpdate(c, v.data(), v.size());
+    return ~c;
+}
+
+std::uint64_t hash64(const std::string& s) {
+    std::uint64_t v = 14695981039346656037ULL;
+    for (char ch : s) { v ^= static_cast<unsigned char>(ch); v *= 1099511628211ULL; }
+    return v;
+}
+struct Bloom {
+    std::vector<std::uint8_t> bits;
+    std::size_t total_bits{0};
+    void Initialize(std::size_t keys) {
+        total_bits = std::max<std::size_t>(64, keys * 10);
+        bits.assign((total_bits + 7) / 8, 0);
+    }
+    void Add(const std::string& key) {
+        const auto h1 = hash64(key);
+        const auto h2 = (h1 >> 17U) | 1ULL;
+        for (std::uint64_t i = 0; i < 7; ++i) {
+            const auto pos = static_cast<std::size_t>((h1 + i * h2) % total_bits);
+            bits[pos >> 3U] = static_cast<std::uint8_t>(bits[pos >> 3U] | (1U << (pos & 7U)));
+        }
+    }
+    bool MayContain(const std::string& key) const {
+        if (total_bits == 0) return false;
+        const auto h1 = hash64(key);
+        const auto h2 = (h1 >> 17U) | 1ULL;
+        for (std::uint64_t i = 0; i < 7; ++i) {
+            const auto pos = static_cast<std::size_t>((h1 + i * h2) % total_bits);
+            if ((bits[pos >> 3U] & (1U << (pos & 7U))) == 0) return false;
+        }
+        return true;
+    }
+};
+
+struct Record { std::uint64_t seq; bool deleted; std::string value; };
+struct IndexEntry { std::string key; std::uint64_t offset; std::uint64_t seq; bool deleted; };
+struct SSTable {
+    std::uint64_t id{0};
+    fs::path path;
+    std::vector<IndexEntry> index;
+    Bloom bloom;
+};
+std::string sstFilename(std::uint64_t id) {
+    std::ostringstream s;
+    s << "SST-" << std::setfill('0') << std::setw(12) << id << ".sst";
+    return s.str();
+}
+void checkBounds(std::size_t k, std::size_t v) {
+    if (k == 0 || k > kMaxKey) fail("key must have 1..4096 bytes");
+    if (v > kMaxValue) fail("value exceeds 8 MiB limit");
+}
+void maybeCrash(const char* point) {
+    const char* configured = std::getenv("STONEKV_FAILPOINT");
+    if (configured != nullptr && std::strcmp(configured, point) == 0) ::_exit(86);
+}
+
+// Writer keeps memory bounded in SST compaction; the index is rebuilt by validation.
+class SSTWriter {
+public:
+    explicit SSTWriter(const fs::path& final_path)
+        : final_(final_path), temp_(final_path.string() + ".tmp"),
+          out_(::open(temp_.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644)) {
+        if (out_.fd < 0) fail(err("create SST"));
+        std::string head(kSstMagic, 8);
+        put64(head, 0);
+        writeAll(out_.fd, head.data(), head.size());
+    }
+    void Append(const std::string& key, const Record& r) {
+        checkBounds(key.size(), r.value.size());
+        if (!prev_.empty() && !(prev_ < key)) fail("SST writer keys not ordered");
+        std::string head;
+        put64(head, r.seq);
+        head.push_back(static_cast<char>(r.deleted ? kDelete : kPut));
+        put32(head, static_cast<std::uint32_t>(key.size()));
+        put32(head, static_cast<std::uint32_t>(r.value.size()));
+        const std::uint32_t crc = crcParts(head.data(), head.size(), key, r.value);
+        put32(head, crc);
+        writeAll(out_.fd, head.data(), head.size());
+        writeAll(out_.fd, key.data(), key.size());
+        writeAll(out_.fd, r.value.data(), r.value.size());
+        ++count_;
+        prev_ = key;
+    }
+    void Finish() {
+        std::string count;
+        put64(count, count_);
+        pwriteAll(out_.fd, count.data(), count.size(), 8);
+        syncFile(out_.fd);
+        // Close before rename: fsync has already completed.
+        out_ = FD{};
+        if (::rename(temp_.c_str(), final_.c_str()) != 0) fail(err("rename SST"));
+        syncDir(final_.parent_path());
+        finished_ = true;
+    }
+    ~SSTWriter() { if (!finished_) { std::error_code ec; fs::remove(temp_, ec); } }
+private:
+    fs::path final_, temp_;
+    FD out_;
+    std::string prev_;
+    std::uint64_t count_{0};
+    bool finished_{false};
+};
+
+SSTable loadSST(const fs::path& path, std::uint64_t id) {
+    FD fd(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
+    if (fd.fd < 0) fail(err("open SST " + path.string()));
+    const auto size = fileSize(fd.fd);
+    if (size < 16) fail("short SST: " + path.string());
+    char head[16];
+    preadAll(fd.fd, head, sizeof(head), 0);
+    if (std::memcmp(head, kSstMagic, 8) != 0) fail("invalid SST magic");
+    const auto count = get64(head + 8);
+    if (count > (size - 16) / (kSstHead + 1)) fail("invalid SST count");
+    SSTable table;
+    table.id = id;
+    table.path = path;
+    table.index.reserve(static_cast<std::size_t>(count));
+    table.bloom.Initialize(static_cast<std::size_t>(count));
+    std::uint64_t off = 16;
+    std::string prev;
+    for (std::uint64_t i = 0; i < count; ++i) {
+        if (off > size || size - off < kSstHead) fail("truncated SST record header");
+        char rh[kSstHead];
+        preadAll(fd.fd, rh, sizeof(rh), off);
+        const auto seq = get64(rh);
+        const auto kind = static_cast<std::uint8_t>(rh[8]);
+        const auto klen = get32(rh + 9), vlen = get32(rh + 13);
+        if (kind != kPut && kind != kDelete) fail("invalid SST operation");
+        checkBounds(klen, vlen);
+        if (off + kSstHead > size || size - off - kSstHead < static_cast<std::uint64_t>(klen) + vlen)
+            fail("truncated SST record payload");
+        std::string key(klen, '\0'), value(vlen, '\0');
+        preadAll(fd.fd, key.data(), key.size(), off + kSstHead);
+        preadAll(fd.fd, value.data(), value.size(), off + kSstHead + klen);
+        if (crcParts(rh, 17, key, value) != get32(rh + 17)) fail("SST CRC mismatch");
+        if (!prev.empty() && !(prev < key)) fail("SST keys unsorted/duplicated");
+        table.index.push_back({key, off, seq, kind == kDelete});
+        table.bloom.Add(key);
+        prev = std::move(key);
+        off += kSstHead + static_cast<std::uint64_t>(klen) + vlen;
+    }
+    if (off != size) fail("unexpected trailing bytes in SST");
+    return table;
+}
+Record readAt(const SSTable& table, const IndexEntry& item) {
+    FD fd(::open(table.path.c_str(), O_RDONLY | O_CLOEXEC));
+    if (fd.fd < 0) fail(err("read SST"));
+    char h[kSstHead];
+    preadAll(fd.fd, h, sizeof(h), item.offset);
+    const auto seq = get64(h);
+    const auto kind = static_cast<std::uint8_t>(h[8]);
+    const auto klen = get32(h + 9), vlen = get32(h + 13);
+    if (klen != item.key.size() || seq != item.seq || (kind == kDelete) != item.deleted ||
+        (kind != kPut && kind != kDelete) || vlen > kMaxValue) fail("SST index/data mismatch");
+    std::string key(klen, '\0'), value(vlen, '\0');
+    preadAll(fd.fd, key.data(), key.size(), item.offset + kSstHead);
+    preadAll(fd.fd, value.data(), value.size(), item.offset + kSstHead + klen);
+    if (key != item.key || get32(h + 17) != crcParts(h, 17, key, value)) fail("SST read CRC mismatch");
+    return {seq, kind == kDelete, std::move(value)};
+}
+
+struct Manifest {
+    std::uint64_t durable_seq{0};
+    std::uint64_t next_id{1};
+    std::vector<std::uint64_t> files;
+};
+void saveManifest(const fs::path& dir, const Manifest& m) {
+    std::ostringstream ss;
+    ss << kManifestMagic << '\n' << m.durable_seq << ' ' << m.next_id << ' ' << m.files.size() << '\n';
+    for (auto id : m.files) ss << id << '\n';
+    std::string content = ss.str();
+    std::ostringstream checksum;
+    checksum << "crc32 " << std::hex << std::setw(8) << std::setfill('0') << crc32(content) << '\n';
+    content += checksum.str();
+    const fs::path tmp = dir / "MANIFEST.tmp";
+    FD fd(::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644));
+    if (fd.fd < 0) fail(err("create MANIFEST"));
+    writeAll(fd.fd, content.data(), content.size());
+    syncFile(fd.fd);
+    fd = FD{};
+    if (::rename(tmp.c_str(), (dir / "MANIFEST").c_str()) != 0) fail(err("rename MANIFEST"));
+    syncDir(dir);
+}
+Manifest readManifest(const fs::path& dir) {
+    std::ifstream in(dir / "MANIFEST", std::ios::binary);
+    if (!in) fail("cannot read MANIFEST");
+    const std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (data.size() > 1024 * 1024) fail("MANIFEST too large");
+    const auto pos = data.rfind("crc32 ");
+    if (pos == std::string::npos || (pos != 0 && data[pos - 1] != '\n')) fail("MANIFEST missing checksum");
+    const std::string payload = data.substr(0, pos);
+    std::istringstream check(data.substr(pos + 6));
+    std::uint32_t expected = 0;
+    if (!(check >> std::hex >> expected) || expected != crc32(payload)) fail("MANIFEST checksum mismatch");
+    std::istringstream ss(payload);
+    std::string magic;
+    Manifest m;
+    std::size_t count = 0;
+    if (!(ss >> magic) || magic != kManifestMagic || !(ss >> m.durable_seq >> m.next_id >> count) ||
+        count > 100000 || m.next_id == 0) fail("bad MANIFEST header");
+    for (std::size_t i = 0; i < count; ++i) {
+        std::uint64_t id = 0;
+        if (!(ss >> id) || id == 0 || id >= m.next_id) fail("invalid MANIFEST SST id");
+        m.files.push_back(id);
+    }
+    std::string unexpected;
+    if (ss >> unexpected) fail("MANIFEST has trailing fields");
+    std::unordered_set<std::uint64_t> unique(m.files.begin(), m.files.end());
+    if (unique.size() != m.files.size()) fail("duplicate SST in MANIFEST");
+    return m;
+}
+
+struct SourceEntry {
+    std::string key;
+    std::uint64_t seq;
+    bool deleted;
+    std::size_t source; // 0: memtable; >=1: table index+1
+    std::size_t index;
+};
+struct KeyGreater {
+    bool operator()(const SourceEntry& a, const SourceEntry& b) const { return a.key > b.key; }
+};
+} // namespace
+
+struct DB::Impl {
+    fs::path dir;
+    Options opt;
+    FD lock_fd;
+    FD wal_fd;
+    mutable std::mutex mutex;
+    Manifest manifest;
+    std::uint64_t latest_seq{0};
+    bool poisoned{false}; // 出现 I/O 提交异常后拒绝继续操作，避免重复序号或状态分叉
+    std::map<std::string, Record> mem;
+    std::size_t mem_bytes{0};
+    std::vector<SSTable> tables;
+
+    explicit Impl(const std::string& directory, Options options) : dir(fs::absolute(directory)), opt(options) {
+        if (options.memtable_max_bytes < 1024 || options.compaction_trigger < 2)
+            fail("memtable_max_bytes must be >=1024 and compaction_trigger >=2");
+        fs::create_directories(dir);
+        lock_fd = FD(::open((dir / "LOCK").c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644));
+        if (lock_fd.fd < 0) fail(err("open LOCK"));
+        if (::flock(lock_fd.fd, LOCK_EX | LOCK_NB) != 0) fail("database already open by another process");
+        if (fs::exists(dir / "MANIFEST")) {
+            manifest = readManifest(dir);
+        } else {
+            // Do not silently overwrite an existing store if MANIFEST disappeared.
+            bool foreign_data = false;
+            for (const auto& entry : fs::directory_iterator(dir)) {
+                if (entry.path().filename() != "LOCK") { foreign_data = true; break; }
+            }
+            if (foreign_data) fail("MANIFEST missing from non-empty directory; refusing new DB");
+            saveManifest(dir, manifest);
+        }
+        latest_seq = manifest.durable_seq;
+        for (auto id : manifest.files) tables.push_back(loadSST(dir / sstFilename(id), id));
+        wal_fd = FD(::open((dir / "active.wal").c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644));
+        if (wal_fd.fd < 0) fail(err("open WAL"));
+        replayWal();
+        // Under the process lock, unreferenced SST and interrupted tmp writes are safe to discard.
+        std::unordered_set<std::string> retained;
+        for (auto id : manifest.files) retained.insert(sstFilename(id));
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            const auto name = entry.path().filename().string();
+            if (name == "MANIFEST.tmp" ||
+                (name.rfind("SST-", 0) == 0 &&
+                 (entry.path().extension() == ".tmp" ||
+                  (entry.path().extension() == ".sst" && retained.count(name) == 0)))) {
+                std::error_code ec;
+                fs::remove(entry.path(), ec);
+                if (ec) fail("cannot clean orphan file " + name + ": " + ec.message());
+            }
+        }
+    }
+
+    void replayWal() {
+        const auto size = fileSize(wal_fd.fd);
+        std::uint64_t off = 0, previous = 0;
+        while (off < size) {
+            if (size - off < kWalHead) break; // interrupted trailing record header
+            char h[kWalHead];
+            preadAll(wal_fd.fd, h, sizeof(h), off);
+            if (std::memcmp(h, "SKW1", 4) != 0) fail("WAL invalid record magic at offset " + std::to_string(off));
+            const auto seq = get64(h + 4);
+            const auto kind = static_cast<std::uint8_t>(h[12]);
+            const auto kl = get32(h + 13), vl = get32(h + 17);
+            if (kind != kPut && kind != kDelete) fail("WAL invalid kind at offset " + std::to_string(off));
+            checkBounds(kl, vl);
+            if (seq == 0 || seq <= previous) fail("WAL sequence out of order");
+            if (size - off - kWalHead < static_cast<std::uint64_t>(kl) + vl) break; // interrupted payload
+            std::string key(kl, '\0'), val(vl, '\0');
+            preadAll(wal_fd.fd, key.data(), key.size(), off + kWalHead);
+            preadAll(wal_fd.fd, val.data(), val.size(), off + kWalHead + kl);
+            if (crcParts(h + 4, 17, key, val) != get32(h + 21))
+                fail("WAL CRC mismatch at offset " + std::to_string(off));
+            previous = seq;
+            if (seq > manifest.durable_seq) setMem(key, {seq, kind == kDelete, std::move(val)});
+            latest_seq = std::max(latest_seq, seq);
+            off += kWalHead + static_cast<std::uint64_t>(kl) + vl;
+        }
+        if (off != size) truncateFile(wal_fd.fd, off); // only incomplete trailing record truncated
+        if (::lseek(wal_fd.fd, 0, SEEK_END) < 0) fail(err("lseek WAL"));
+    }
+    void setMem(const std::string& key, Record record) {
+        const auto it = mem.find(key);
+        if (it != mem.end()) mem_bytes -= key.size() + it->second.value.size() + 32;
+        mem_bytes += key.size() + record.value.size() + 32;
+        mem[key] = std::move(record);
+    }
+    void appendWal(const std::string& key, const std::string& val, std::uint8_t kind, std::uint64_t seq) {
+        std::string h("SKW1", 4);
+        put64(h, seq);
+        h.push_back(static_cast<char>(kind));
+        put32(h, static_cast<std::uint32_t>(key.size()));
+        put32(h, static_cast<std::uint32_t>(val.size()));
+        put32(h, crcParts(h.data() + 4, 17, key, val));
+        // A single writer is protected by mutex; position is EOF after replay/truncate.
+        writeAll(wal_fd.fd, h.data(), h.size());
+        writeAll(wal_fd.fd, key.data(), key.size());
+        writeAll(wal_fd.fd, val.data(), val.size());
+        if (opt.sync_writes) syncFile(wal_fd.fd);
+    }
+    void mutate(const std::string& key, const std::string& val, std::uint8_t kind) {
+        checkBounds(key.size(), val.size());
+        std::lock_guard<std::mutex> guard(mutex);
+        if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
+        if (latest_seq == std::numeric_limits<std::uint64_t>::max()) fail("sequence overflow");
+        const auto seq = latest_seq + 1;
+        try {
+            // 先将写入持久化到 WAL；默认 fsync 成功后才更新内存状态。
+            appendWal(key, val, kind, seq);
+            latest_seq = seq;
+            setMem(key, {seq, kind == kDelete, val});
+            if (mem_bytes >= opt.memtable_max_bytes) flushLocked();
+        } catch (...) {
+            // I/O 失败可能让磁盘落入“写了部分字节”的不确定状态，不可再沿用此实例。
+            poisoned = true;
+            throw;
+        }
+    }
+    std::optional<std::string> getLocked(const std::string& key) const {
+        if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
+        if (const auto it = mem.find(key); it != mem.end()) {
+            if (it->second.deleted) return std::nullopt;
+            return it->second.value;
+        }
+        // 新的 SST 文件优先；同一键的较早版本被新值或墓碑覆盖。
+        for (auto it = tables.rbegin(); it != tables.rend(); ++it) {
+            if (!it->bloom.MayContain(key)) continue;
+            const auto& idx = it->index;
+            auto pos = std::lower_bound(idx.begin(), idx.end(), key,
+                [](const IndexEntry& e, const std::string& k) { return e.key < k; });
+            if (pos == idx.end() || pos->key != key) continue;
+            if (pos->deleted) return std::nullopt;
+            return readAt(*it, *pos).value;
+        }
+        return std::nullopt;
+    }
+    void flushLocked() {
+        if (mem.empty()) return;
+        const auto id = manifest.next_id;
+        SSTWriter writer(dir / sstFilename(id));
+        // 先写 SST.tmp 并 fsync，再 rename；MANIFEST 提交之前不能截断 WAL。
+        for (const auto& kv : mem) writer.Append(kv.first, kv.second);
+        writer.Finish();
+        maybeCrash("after_sst_rename");
+        SSTable new_table = loadSST(dir / sstFilename(id), id);
+        Manifest updated = manifest;
+        updated.files.push_back(id);
+        updated.next_id = id + 1;
+        updated.durable_seq = latest_seq;
+        saveManifest(dir, updated);
+        maybeCrash("after_manifest_rename");
+        tables.push_back(std::move(new_table));
+        manifest = std::move(updated);
+        mem.clear();
+        mem_bytes = 0;
+        // MANIFEST 已持久化后，才能清空 WAL；崩溃重放会跳过 <= durable_seq 的旧记录。
+        truncateFile(wal_fd.fd, 0);
+        if (::lseek(wal_fd.fd, 0, SEEK_END) < 0) fail(err("reset WAL position"));
+        maybeCrash("after_wal_truncate");
+        if (tables.size() >= opt.compaction_trigger) compactLocked();
+    }
+    void compactLocked() {
+        if (tables.size() < 2) return;
+        const auto id = manifest.next_id;
+        SSTWriter writer(dir / sstFilename(id));
+        std::priority_queue<SourceEntry, std::vector<SourceEntry>, KeyGreater> pq;
+        auto push = [&](std::size_t src, std::size_t pos) {
+            const auto& table = tables[src];
+            if (pos < table.index.size()) {
+                const auto& item = table.index[pos];
+                pq.push({item.key, item.seq, item.deleted, src + 1, pos});
+            }
+        };
+        for (std::size_t i = 0; i < tables.size(); ++i) push(i, 0);
+        while (!pq.empty()) {
+            const auto key = pq.top().key;
+            SourceEntry best = pq.top();
+            while (!pq.empty() && pq.top().key == key) {
+                const auto curr = pq.top(); pq.pop();
+                if (curr.seq > best.seq) best = curr;
+                push(curr.source - 1, curr.index + 1);
+            }
+            // Since all SSTables are merged, no older disk version can be exposed.
+            if (!best.deleted) {
+                const auto& tab = tables[best.source - 1];
+                writer.Append(key, readAt(tab, tab.index[best.index]));
+            }
+        }
+        writer.Finish();
+        maybeCrash("after_compaction_sst_rename");
+        SSTable compacted = loadSST(dir / sstFilename(id), id);
+        Manifest updated = manifest;
+        updated.files = {id};
+        updated.next_id = id + 1;
+        // durable_seq unchanged: all WAL-covered versions are already in SSTables.
+        // 新 SST + MANIFEST 成功后才允许删除旧 SST；保留崩溃恢复能力。
+        saveManifest(dir, updated);
+        maybeCrash("after_compaction_manifest");
+        const auto old = manifest.files;
+        manifest = std::move(updated);
+        tables.clear();
+        tables.push_back(std::move(compacted));
+        for (auto old_id : old) {
+            std::error_code ec;
+            fs::remove(dir / sstFilename(old_id), ec);
+            if (ec) fail("failed deleting obsolete SST: " + ec.message());
+        }
+        syncDir(dir);
+    }
+    void flush() {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
+        try { flushLocked(); } catch (...) { poisoned = true; throw; }
+    }
+    void compact() {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
+        try { flushLocked(); compactLocked(); } catch (...) { poisoned = true; throw; }
+    }
+    Stats stats() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return {latest_seq, manifest.durable_seq, mem.size(), mem_bytes, tables.size(), fileSize(wal_fd.fd)};
+    }
+    std::vector<std::pair<std::string, std::string>> scan(
+        const std::string& begin, const std::string& end, std::size_t limit) const {
+        if (limit > 100000) fail("scan limit maximum is 100000");
+        if (limit == 0 || (!end.empty() && begin >= end)) return {};
+        std::lock_guard<std::mutex> lock(mutex);
+        if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
+        std::vector<std::pair<std::string, Record>> mem_records;
+        for (auto it = mem.lower_bound(begin); it != mem.end(); ++it) {
+            if (!end.empty() && it->first >= end) break;
+            mem_records.push_back(*it);
+        }
+        std::priority_queue<SourceEntry, std::vector<SourceEntry>, KeyGreater> pq;
+        auto push = [&](std::size_t src, std::size_t pos) {
+            if (src == 0) {
+                if (pos >= mem_records.size()) return;
+                const auto& e = mem_records[pos];
+                pq.push({e.first, e.second.seq, e.second.deleted, src, pos});
+            } else {
+                const auto& idx = tables[src - 1].index;
+                if (pos >= idx.size()) return;
+                const auto& item = idx[pos];
+                if (!end.empty() && item.key >= end) return;
+                pq.push({item.key, item.seq, item.deleted, src, pos});
+            }
+        };
+        push(0, 0);
+        for (std::size_t src = 1; src <= tables.size(); ++src) {
+            const auto& idx = tables[src - 1].index;
+            const auto it = std::lower_bound(idx.begin(), idx.end(), begin,
+                [](const IndexEntry& e, const std::string& k) { return e.key < k; });
+            push(src, static_cast<std::size_t>(it - idx.begin()));
+        }
+        std::vector<std::pair<std::string, std::string>> result;
+        while (!pq.empty() && result.size() < limit) {
+            const auto key = pq.top().key;
+            SourceEntry best = pq.top();
+            while (!pq.empty() && pq.top().key == key) {
+                auto curr = pq.top(); pq.pop();
+                if (curr.seq > best.seq) best = curr;
+                push(curr.source, curr.index + 1);
+            }
+            if (!best.deleted) {
+                if (best.source == 0) result.emplace_back(key, mem_records[best.index].second.value);
+                else {
+                    const auto& table = tables[best.source - 1];
+                    result.emplace_back(key, readAt(table, table.index[best.index]).value);
+                }
+            }
+        }
+        return result;
+    }
+};
+
+DB::DB(std::string directory, Options options) : p_(std::make_unique<Impl>(directory, options)) {}
+DB::~DB() = default;
+void DB::Put(const std::string& key, const std::string& value) { p_->mutate(key, value, kPut); }
+void DB::Delete(const std::string& key) { p_->mutate(key, "", kDelete); }
+std::optional<std::string> DB::Get(const std::string& key) const {
+    checkBounds(key.size(), 0);
+    std::lock_guard<std::mutex> lock(p_->mutex);
+    return p_->getLocked(key);
+}
+std::vector<std::pair<std::string, std::string>> DB::Scan(
+    const std::string& begin, const std::string& end, std::size_t limit) const {
+    return p_->scan(begin, end, limit);
+}
+void DB::Flush() { p_->flush(); }
+void DB::Compact() { p_->compact(); }
+Stats DB::GetStats() const { return p_->stats(); }
+} // namespace stonekv

@@ -1,0 +1,12 @@
+build/
+build-asan/
+build-release/
+build-windows-attempt/
+StoneKV_v1.0_Linux_Cpp_Full_Project.zip
+*.csv
+*.log
+*.sst
+*.wal
+MANIFEST
+LOCK
+__pycache__/

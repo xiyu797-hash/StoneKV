@@ -1,0 +1,28 @@
+cmake_minimum_required(VERSION 3.16)
+project(StoneKV VERSION 1.0.0 LANGUAGES CXX)
+
+option(STONEKV_BUILD_TESTS "Build test suite" ON)
+option(STONEKV_ENABLE_SANITIZERS "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+
+add_library(stonekv STATIC src/db.cpp)
+target_include_directories(stonekv PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(stonekv PUBLIC cxx_std_17)
+target_compile_options(stonekv PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+if(STONEKV_ENABLE_SANITIZERS)
+  target_compile_options(stonekv PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+  target_link_options(stonekv PUBLIC -fsanitize=address,undefined)
+endif()
+
+add_executable(stonekv_cli tools/cli.cpp)
+target_link_libraries(stonekv_cli PRIVATE stonekv)
+add_executable(stonekv_bench tools/bench.cpp)
+target_link_libraries(stonekv_bench PRIVATE stonekv)
+
+if(STONEKV_BUILD_TESTS)
+  enable_testing()
+  find_package(Threads REQUIRED)
+  add_executable(stonekv_tests tests/test_db.cpp)
+  target_link_libraries(stonekv_tests PRIVATE stonekv Threads::Threads)
+  add_test(NAME stonekv_core COMMAND stonekv_tests)
+  set_tests_properties(stonekv_core PROPERTIES TIMEOUT 90)
+endif()

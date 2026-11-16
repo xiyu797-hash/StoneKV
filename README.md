@@ -130,3 +130,9 @@ data/
 ## 6. 注意事项
 
 StoneKV 是一个**独立可运行的基础版存储引擎**。它可以作为 Linux C++ 求职时展示文件 IO、异常恢复、数据结构、并发保护的起点，但没有可复现的复杂工作负载、长时间断电实验和真实业务接入之前，不应宣称工业级数据库或达到 RocksDB 水平。项目完成不等于已经掌握，建议先手写 WAL 编码、恢复和两路 SST 归并，再参加相关面试。
+
+### 结构化状态与工具限制
+
+`stonekv_cli <db_dir> stats-json` 输出一条可解析 JSON 的状态快照，不包含键、值或数据库路径；后台任务、缓存与 Compaction 计数是**当前 DB 实例**内的计数，CLI 每次打开新实例，因此不是跨进程持久统计或事件日志。缓存配置 `block_cache_capacity_bytes` 接受0至256 MiB；0禁用。
+
+当前服务器的 GCC ThreadSanitizer 构建成功，但测试运行发生 `FATAL: ThreadSanitizer: unexpected memory mapping`，并非通过；原始输出在 `evidence/linux_20261115/tsan_20261116.txt`。CI 增加独立 TSan job，状态需要实际推送后观察，不能预先声称通过。ASan/UBSan 是独立配置，不能与 TSan 同时开启。

@@ -1,0 +1,95 @@
+COMMAND: cmake -S . -B /tmp/stonekv_tsan_20261116 -DCMAKE_BUILD_TYPE=Debug -DSTONEKV_ENABLE_TSAN=ON
+-- The CXX compiler identification is GNU 13.3.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE  
+-- Configuring done (0.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /tmp/stonekv_tsan_20261116
+CONFIG_EXIT=0
+COMMAND: cmake --build /tmp/stonekv_tsan_20261116 -j 3
+[  4%] Building CXX object CMakeFiles/stonekv.dir/src/db.cpp.o
+[  8%] Linking CXX static library libstonekv.a
+[  8%] Built target stonekv
+[ 16%] Building CXX object CMakeFiles/stonekv_benchmark_workloads.dir/tools/benchmark_workloads.cpp.o
+[ 16%] Building CXX object CMakeFiles/stonekv_bench.dir/tools/bench.cpp.o
+[ 20%] Building CXX object CMakeFiles/stonekv_cli.dir/tools/cli.cpp.o
+[ 25%] Linking CXX executable stonekv_cli
+[ 25%] Built target stonekv_cli
+[ 29%] Building CXX object CMakeFiles/stonekv_sst_index_probe.dir/tools/sst_index_probe.cpp.o
+[ 33%] Linking CXX executable stonekv_bench
+[ 33%] Built target stonekv_bench
+[ 37%] Building CXX object CMakeFiles/stonekv_tests.dir/tests/test_db.cpp.o
+[ 41%] Linking CXX executable stonekv_sst_index_probe
+[ 45%] Linking CXX executable stonekv_benchmark_workloads
+[ 45%] Built target stonekv_sst_index_probe
+[ 50%] Building CXX object CMakeFiles/stonekv_io_fault_tests.dir/tests/io_fault_regression.cpp.o
+[ 50%] Built target stonekv_benchmark_workloads
+[ 54%] Building CXX object CMakeFiles/stonekv_background_flush_test.dir/tests/background_flush_test.cpp.o
+[ 58%] Linking CXX executable stonekv_io_fault_tests
+[ 58%] Built target stonekv_io_fault_tests
+[ 62%] Building CXX object CMakeFiles/stonekv_background_compaction_test.dir/tests/background_compaction_test.cpp.o
+[ 66%] Linking CXX executable stonekv_background_flush_test
+[ 66%] Built target stonekv_background_flush_test
+[ 70%] Building CXX object CMakeFiles/stonekv_sstable_handle_cache_test.dir/tests/sstable_handle_cache_test.cpp.o
+[ 75%] Linking CXX executable stonekv_tests
+[ 75%] Built target stonekv_tests
+[ 79%] Building CXX object CMakeFiles/stonekv_sstable_block_cache_test.dir/tests/sstable_block_cache_test.cpp.o
+[ 83%] Linking CXX executable stonekv_sstable_block_cache_test
+[ 87%] Linking CXX executable stonekv_sstable_handle_cache_test
+[ 87%] Built target stonekv_sstable_block_cache_test
+[ 87%] Built target stonekv_sstable_handle_cache_test
+[ 91%] Linking CXX executable stonekv_background_compaction_test
+[ 95%] Building CXX object CMakeFiles/stonekv_crash_stress.dir/tests/crash_stress.cpp.o
+[ 95%] Built target stonekv_background_compaction_test
+[100%] Linking CXX executable stonekv_crash_stress
+[100%] Built target stonekv_crash_stress
+BUILD_EXIT=0
+COMMAND: TSAN_OPTIONS=halt_on_error=1 ctest --test-dir /tmp/stonekv_tsan_20261116 --output-on-failure
+Internal ctest changing into directory: /tmp/stonekv_tsan_20261116
+Test project /tmp/stonekv_tsan_20261116
+    Start 1: stonekv_core
+1/7 Test #1: stonekv_core .....................***Failed    0.00 sec
+FATAL: ThreadSanitizer: unexpected memory mapping 0x7342e3272000-0x7342e3700000
+
+    Start 2: stonekv_io_faults
+2/7 Test #2: stonekv_io_faults ................***Failed    0.00 sec
+FATAL: ThreadSanitizer: unexpected memory mapping 0x5eb961261000-0x5eb961267000
+
+    Start 3: stonekv_background_flush
+3/7 Test #3: stonekv_background_flush .........   Passed    2.32 sec
+    Start 4: stonekv_background_compaction
+4/7 Test #4: stonekv_background_compaction ....***Failed    0.00 sec
+FATAL: ThreadSanitizer: unexpected memory mapping 0x5f910c54b000-0x5f910c552000
+
+    Start 5: stonekv_sstable_handle_cache
+5/7 Test #5: stonekv_sstable_handle_cache .....***Failed    0.00 sec
+FATAL: ThreadSanitizer: unexpected memory mapping 0x60c9b5587000-0x60c9b558c000
+
+    Start 6: stonekv_sstable_block_cache
+6/7 Test #6: stonekv_sstable_block_cache ......***Failed    0.00 sec
+FATAL: ThreadSanitizer: unexpected memory mapping 0x5c8594564000-0x5c8594569000
+
+    Start 7: stonekv_crash_stress_smoke
+7/7 Test #7: stonekv_crash_stress_smoke .......***Failed    0.00 sec
+FATAL: ThreadSanitizer: unexpected memory mapping 0x712634872000-0x712634d00000
+
+
+14% tests passed, 6 tests failed out of 7
+
+Total Test time (real) =   2.34 sec
+
+The following tests FAILED:
+	  1 - stonekv_core (Failed)
+	  2 - stonekv_io_faults (Failed)
+	  4 - stonekv_background_compaction (Failed)
+	  5 - stonekv_sstable_handle_cache (Failed)
+	  6 - stonekv_sstable_block_cache (Failed)
+	  7 - stonekv_crash_stress_smoke (Failed)
+Errors while running CTest
+CTEST_EXIT=8

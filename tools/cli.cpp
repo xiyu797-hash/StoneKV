@@ -12,7 +12,7 @@ void usage() {
               << "  stonekv_cli <database_dir> get <key>\n"
               << "  stonekv_cli <database_dir> del <key>\n"
               << "  stonekv_cli <database_dir> scan [begin] [end] [limit]\n"
-              << "  stonekv_cli <database_dir> stats | flush | compact\n"
+              << "  stonekv_cli <database_dir> stats | stats-json | flush | compact\n"
               << "Note: CLI displays raw values as text; C++ API supports arbitrary bytes.\n";
 }
 }
@@ -43,6 +43,24 @@ int main(int argc, char** argv) {
                       << "memtable_bytes=" << s.memtable_bytes << '\n'
                       << "sstable_count=" << s.sstable_count << '\n'
                       << "wal_bytes=" << s.wal_bytes << '\n';
+        } else if (cmd == "stats-json" && argc == 3) {
+            const auto s = db.GetStats();
+            // Stable numeric JSON fields, without keys, values or database path.
+            std::cout << "{\"event\":\"stats\",\"latest_sequence\":" << s.latest_sequence
+                      << ",\"durable_sequence\":" << s.durable_sequence
+                      << ",\"memtable_entries\":" << s.memtable_entries
+                      << ",\"memtable_bytes\":" << s.memtable_bytes
+                      << ",\"sstable_count\":" << s.sstable_count
+                      << ",\"wal_bytes\":" << s.wal_bytes
+                      << ",\"compaction_count\":" << s.compaction_count
+                      << ",\"compaction_micros\":" << s.compaction_micros
+                      << ",\"compaction_output_bytes\":" << s.compaction_output_bytes
+                      << ",\"background_tasks\":" << s.background_tasks
+                      << ",\"block_cache_bytes\":" << s.block_cache_bytes
+                      << ",\"block_cache_hits\":" << s.block_cache_hits
+                      << ",\"block_cache_misses\":" << s.block_cache_misses
+                      << ",\"sst_full_index_entries\":" << s.sst_full_index_entries
+                      << ",\"sst_sparse_blocks\":" << s.sst_sparse_blocks << "}\n";
         } else if (cmd == "flush" && argc == 3) {
             db.Flush(); std::cout << "OK\n";
         } else if (cmd == "compact" && argc == 3) {

@@ -253,6 +253,8 @@ struct SSTable {
     Bloom bloom;
     std::vector<SparseBlock> sparse_blocks;
     bool sparse_index{false};
+    bool has_keys{false};
+    std::string first_key, last_key;
 };
 std::string sstFilename(std::uint64_t id) {
     std::ostringstream s;
@@ -449,6 +451,7 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
         preadAll(fd.fd, value.data(), value.size(), off + kSstHead + klen);
         if (crcParts(rh, 17, key, value) != get32(rh + 17)) fail("SST CRC mismatch");
         if (!prev.empty() && !(prev < key)) fail("SST keys unsorted/duplicated");
+        if (!table.has_keys) { table.first_key = key; table.has_keys = true; }
         if (indexed_format && first_in_block && table.sparse_blocks[block_number].first_key != key)
             fail("SST sparse index first key mismatch");
         if (first_in_block) { ++block_number; first_in_block = false; }
@@ -461,6 +464,7 @@ SSTable loadSST(const fs::path& path, std::uint64_t id) {
     }
     if (off != data_end || (block_format && off != block_end) ||
         (indexed_format && block_number != table.sparse_blocks.size())) fail("unexpected trailing bytes in SST");
+    table.last_key = std::move(prev);
     return table;
 }
 Record readAt(const SSTable& table, const IndexEntry& item, int reader_fd = -1) {
@@ -1185,12 +1189,15 @@ struct DB::Impl {
         // A cursor retains at most one sparse block index per SST. Queue nodes
         // own their entry so advancing into the next block cannot invalidate a
         // duplicate-key candidate that is still being resolved.
-        struct Cursor { std::size_t block = 0, pos = 0; std::vector<IndexEntry> entries; };
+        struct Cursor { std::size_t block = 0, pos = 0; bool exhausted = false; std::vector<IndexEntry> entries; };
         struct Node { std::string key; std::uint64_t seq; bool deleted; std::size_t source, mem_index; IndexEntry item; };
         struct Greater { bool operator()(const Node& a, const Node& b) const { return a.key > b.key; } };
         std::vector<Cursor> cursors(tables.size());
         for (std::size_t i = 0; i < tables.size(); ++i) {
             const auto& table = tables[i]; auto& cursor = cursors[i];
+            if (!table.has_keys || table.last_key < begin || (!end.empty() && table.first_key >= end)) {
+                cursor.exhausted = true; continue;
+            }
             if (!table.sparse_index) {
                 cursor.pos = static_cast<std::size_t>(std::lower_bound(table.index.begin(), table.index.end(), begin,
                     [](const IndexEntry& e, const std::string& k) { return e.key < k; }) - table.index.begin());
@@ -1216,6 +1223,7 @@ struct DB::Impl {
                 return;
             }
             const auto& table = tables[src - 1]; auto& cursor = cursors[src - 1];
+            if (cursor.exhausted) return;
             if (table.sparse_index) {
                 while (cursor.pos >= cursor.entries.size() && !table.sparse_blocks.empty() && cursor.block + 1 < table.sparse_blocks.size()) {
                     ++cursor.block; cursor.entries = cachedSparseBlockIndex(table, table.sparse_blocks[cursor.block]); cursor.pos = 0;

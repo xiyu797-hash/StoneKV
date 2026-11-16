@@ -135,4 +135,6 @@ StoneKV 是一个**独立可运行的基础版存储引擎**。它可以作为 L
 
 `stonekv_cli <db_dir> stats-json` 输出一条可解析 JSON 的状态快照，不包含键、值或数据库路径；后台任务、缓存与 Compaction 计数是**当前 DB 实例**内的计数，CLI 每次打开新实例，因此不是跨进程持久统计或事件日志。缓存配置 `block_cache_capacity_bytes` 接受0至256 MiB；0禁用。
 
-当前服务器的 GCC ThreadSanitizer 构建成功，但测试运行发生 `FATAL: ThreadSanitizer: unexpected memory mapping`，并非通过；原始输出在 `evidence/linux_20261115/tsan_20261116.txt`。CI 增加独立 TSan job，状态需要实际推送后观察，不能预先声称通过。ASan/UBSan 是独立配置，不能与 TSan 同时开启。
+当前服务器的 GCC ThreadSanitizer 构建成功，但测试运行发生 `FATAL: ThreadSanitizer: unexpected memory mapping`，并非通过；原始输出在 `evidence/linux_20261115/tsan_20261116.txt`。远端 [GitHub Actions](https://github.com/xiyu797-hash/StoneKV/actions/runs/43787308265) 的独立 TSan job 对提交 `1e0c687` 通过，后续提交的状态以 Actions 页面为准。ASan/UBSan 是独立配置，不能与 TSan 同时开启。
+
+CLI 可设置 `STONEKV_LOG_JSON=1` 输出逐行 JSON 运行日志到 stderr，stdout 的命令结果和退出码保持原有接口；支持 start、error、end 事件、操作名、Unix 毫秒、总耗时及退出码。日志不记录操作键值；错误诊断可能包含文件路径。为确保任意字节产生合法 JSON，非 ASCII 诊断字节以 `\\u00xx` 形式转义。设置值只允许 `0` 或 `1`。这些事件描述 CLI 单次调用，不代表后台任务的逐事件追踪；Compaction 等统计可通过 `stats-json` 查询。

@@ -1,12 +1,15 @@
 #include "stonekv/db.hpp"
 
+#include <chrono>
+#include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
 namespace {
-void usage() {
-    std::cerr << "StoneKV CLI (Linux)\n"
+void usage(std::ostream& errors) {
+    errors << "StoneKV CLI (Linux)\n"
               << "Usage:\n"
               << "  stonekv_cli <database_dir> put <key> <value>\n"
               << "  stonekv_cli <database_dir> get <key>\n"
@@ -15,10 +18,9 @@ void usage() {
               << "  stonekv_cli <database_dir> stats | stats-json | flush | compact\n"
               << "Note: CLI displays raw values as text; C++ API supports arbitrary bytes.\n";
 }
-}
-int main(int argc, char** argv) {
+int run(int argc, char** argv, std::ostream& errors) {
     try {
-        if (argc < 3) { usage(); return 2; }
+        if (argc < 3) { usage(errors); return 2; }
         stonekv::DB db(argv[1]);
         const std::string cmd(argv[2]);
         if (cmd == "put" && argc == 5) {
@@ -66,10 +68,42 @@ int main(int argc, char** argv) {
             db.Flush(); std::cout << "OK\n";
         } else if (cmd == "compact" && argc == 3) {
             db.Compact(); std::cout << "OK\n";
-        } else { usage(); return 2; }
+        } else { usage(errors); return 2; }
     } catch (const std::exception& e) {
-        std::cerr << "ERROR: " << e.what() << '\n';
+        errors << "ERROR: " << e.what() << '\n';
         return 1;
     }
     return 0;
+}
+std::string jsonEscape(const std::string& text) {
+    const char* hex="0123456789abcdef";
+    std::string out;
+    for(const unsigned char c : text) {
+        if(c=='"' || c=='\\') { out+='\\'; out+=static_cast<char>(c); }
+        else if(c<0x20 || c>=0x80) { out+="\\u00"; out+=hex[c>>4]; out+=hex[c&15]; }
+        else out+=static_cast<char>(c);
+    }
+    return out;
+}
+std::int64_t unixMillis() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+}
+int main(int argc,char** argv) {
+    const char* configured=std::getenv("STONEKV_LOG_JSON");
+    const std::string setting=configured?configured:"0";
+    if(setting!="0" && setting!="1") { std::cerr<<"ERROR: STONEKV_LOG_JSON must be 0 or 1\n"; return 2; }
+    if(setting=="0") return run(argc,argv,std::cerr);
+    const std::string raw=argc>2?argv[2]:"";
+    const bool known=raw=="put" || raw=="get" || raw=="del" || raw=="scan" || raw=="stats" || raw=="stats-json" || raw=="flush" || raw=="compact";
+    const std::string operation=known?raw:"invalid";
+    const auto start=std::chrono::steady_clock::now();
+    std::cerr<<"{\"event\":\"operation_start\",\"operation\":\""<<operation<<"\",\"time_unix_ms\":"<<unixMillis()<<"}\n";
+    std::ostringstream errors;
+    const int result=run(argc,argv,errors);
+    if(!errors.str().empty())
+        std::cerr<<"{\"event\":\"operation_error\",\"operation\":\""<<operation<<"\",\"time_unix_ms\":"<<unixMillis()<<",\"message\":\""<<jsonEscape(errors.str())<<"\"}\n";
+    const auto elapsed=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count();
+    std::cerr<<"{\"event\":\"operation_end\",\"operation\":\""<<operation<<"\",\"time_unix_ms\":"<<unixMillis()<<",\"duration_us\":"<<elapsed<<",\"exit_code\":"<<result<<"}\n";
+    return result;
 }

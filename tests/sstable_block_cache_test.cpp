@@ -45,5 +45,11 @@ int main(){try{
   if(rows.size()!=1||rows[0].first!="z0"||rows[0].second!="ok")throw std::runtime_error("range prune wrong result");
   if(calls>4)throw std::runtime_error("scan read SSTs outside key range: "+std::to_string(calls));
  }
+ std::string t5="/tmp/stonekv-get-range-prune-XXXXXX";std::vector<char> p5(t5.begin(),t5.end());p5.push_back('\0');auto dir5=::mkdtemp(p5.data());if(!dir5)throw std::runtime_error("mkdtemp get prune");
+ {stonekv::Options o;o.sync_writes=false;o.compaction_trigger=100;o.block_cache_capacity_bytes=0;stonekv::DB db(dir5,o);
+  for(int i=0;i<10;++i){for(int j=0;j<100;++j)db.Put("a"+std::to_string(i)+"-"+std::to_string(j),"v");db.Flush();}reads=0;
+  for(int i=0;i<10000;++i)if(db.Get("z"+std::to_string(i)))throw std::runtime_error("out of range get found key");
+  if(reads.load()!=0)throw std::runtime_error("out of range get read SST blocks: "+std::to_string(reads.load()));
+ }
  std::cout<<"PASS block cache read reuse and invalidation fixture="<<dir<<'\n';return 0;
 }catch(const std::exception&e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}}

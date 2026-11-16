@@ -924,6 +924,7 @@ struct DB::Impl {
         }
         // 新的 SST 文件优先；同一键的较早版本被新值或墓碑覆盖。
         for (auto it = tables.rbegin(); it != tables.rend(); ++it) {
+            if (!it->has_keys || key < it->first_key || key > it->last_key) continue;
             if (!it->bloom.MayContain(key)) continue;
             if (it->sparse_index) {
                 auto block = std::upper_bound(it->sparse_blocks.begin(), it->sparse_blocks.end(), key,

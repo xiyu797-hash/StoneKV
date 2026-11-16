@@ -170,6 +170,28 @@ const std::array<std::uint32_t, 256>& crcTable() {
 std::uint32_t crcUpdate(std::uint32_t crc, const void* data, std::size_t len) {
     const auto* p = static_cast<const unsigned char*>(data);
     const auto& t = crcTable();
+    // Slicing-by-four uses the same IEEE CRC-32 polynomial and initial/final
+    // conventions as the byte-at-a-time version; no alignment assumptions.
+    static const auto slices = [] {
+        std::array<std::array<std::uint32_t, 256>, 4> result{};
+        result[0] = crcTable();
+        for (std::size_t n = 1; n < result.size(); ++n)
+            for (std::size_t i = 0; i < 256; ++i) {
+                const auto v = result[n-1][i];
+                result[n][i] = result[0][v & 0xffU] ^ (v >> 8U);
+            }
+        return result;
+    }();
+    while (len >= 4) {
+        const auto word = static_cast<std::uint32_t>(p[0]) |
+                          (static_cast<std::uint32_t>(p[1]) << 8U) |
+                          (static_cast<std::uint32_t>(p[2]) << 16U) |
+                          (static_cast<std::uint32_t>(p[3]) << 24U);
+        crc ^= word;
+        crc = slices[3][crc & 0xffU] ^ slices[2][(crc >> 8U) & 0xffU] ^
+              slices[1][(crc >> 16U) & 0xffU] ^ slices[0][crc >> 24U];
+        p += 4; len -= 4;
+    }
     for (std::size_t i = 0; i < len; ++i) crc = t[(crc ^ p[i]) & 0xffU] ^ (crc >> 8U);
     return crc;
 }

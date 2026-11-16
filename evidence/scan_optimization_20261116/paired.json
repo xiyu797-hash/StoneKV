@@ -1,0 +1,68 @@
+[
+  {
+    "round": 1,
+    "variant": "before",
+    "exit": 0,
+    "stdout": "scan_5000_ms=517",
+    "stderr": "",
+    "command": [
+      "/tmp/stonekv_scan_after_20261116",
+      "/tmp/stonekv_scan_sprint_20261116/db_before_1"
+    ]
+  },
+  {
+    "round": 1,
+    "variant": "after",
+    "exit": 0,
+    "stdout": "scan_5000_ms=188",
+    "stderr": "",
+    "command": [
+      "/tmp/stonekv_scan_sprint_20261116/after",
+      "/tmp/stonekv_scan_sprint_20261116/db_after_1"
+    ]
+  },
+  {
+    "round": 2,
+    "variant": "after",
+    "exit": 0,
+    "stdout": "scan_5000_ms=184",
+    "stderr": "",
+    "command": [
+      "/tmp/stonekv_scan_sprint_20261116/after",
+      "/tmp/stonekv_scan_sprint_20261116/db_after_2"
+    ]
+  },
+  {
+    "round": 2,
+    "variant": "before",
+    "exit": 0,
+    "stdout": "scan_5000_ms=527",
+    "stderr": "",
+    "command": [
+      "/tmp/stonekv_scan_after_20261116",
+      "/tmp/stonekv_scan_sprint_20261116/db_before_2"
+    ]
+  },
+  {
+    "round": 3,
+    "variant": "before",
+    "exit": 0,
+    "stdout": "scan_5000_ms=517",
+    "stderr": "",
+    "command": [
+      "/tmp/stonekv_scan_after_20261116",
+      "/tmp/stonekv_scan_sprint_20261116/db_before_3"
+    ]
+  },
+  {
+    "round": 3,
+    "variant": "after",
+    "exit": 0,
+    "stdout": "scan_5000_ms=188",
+    "stderr": "",
+    "command": [
+      "/tmp/stonekv_scan_sprint_20261116/after",
+      "/tmp/stonekv_scan_sprint_20261116/db_after_3"
+    ]
+  }
+]

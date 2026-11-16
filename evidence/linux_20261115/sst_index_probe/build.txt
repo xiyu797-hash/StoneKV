@@ -1,0 +1,4 @@
+COMMAND: g++ -std=c++17 -O3 -DNDEBUG -pthread -I /tmp/stonekv_original_2318bb6_20261115/include tools/sst_index_probe.cpp /tmp/stonekv_original_2318bb6_20261115/src/db.cpp -o /tmp/stonekv_sst_probe_20261115/probe_baseline
+BASE_BUILD_EXIT=0
+COMMAND: g++ -std=c++17 -O3 -DNDEBUG -pthread -DSTONEKV_HAS_INDEX_STATS -I include tools/sst_index_probe.cpp src/db.cpp -o /tmp/stonekv_sst_probe_20261115/probe_sparse
+SPARSE_BUILD_EXIT=0

@@ -1,0 +1,3 @@
+COMMAND: ./probe_baseline create db_baseline 20000 5000 42
+created=20000
+EXIT_CODE=0

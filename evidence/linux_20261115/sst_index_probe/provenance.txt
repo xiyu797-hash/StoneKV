@@ -1,0 +1,9 @@
+COMMAND: sum of DB regular file sizes
+baseline 6760063
+sparse 6793951
+COMMAND: git rev-parse HEAD
+65d33c6865ceb4137b14761afe3ccfbd32fc988f
+COMMAND: sha256sum tools/sst_index_probe.cpp
+2ff62ab37b2ca3c1cebdbe2b3f5d52c431b3faae8191e5d935eb2520a8cd2ad5  tools/sst_index_probe.cpp
+baseline_source_commit=2318bb65bc0d13b562dc1cee755355e6690c142f
+current_source_commit=65d33c6 (compiled before adding benchmark-only files)

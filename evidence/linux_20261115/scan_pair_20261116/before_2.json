@@ -1,0 +1,9 @@
+{
+  "command": [
+    "/tmp/stonekv_scan_before_20261116",
+    "/tmp/stonekv_scan_pair_20261116/before_2"
+  ],
+  "exit": 0,
+  "stdout": "scan_5000_ms=590\n",
+  "stderr": ""
+}

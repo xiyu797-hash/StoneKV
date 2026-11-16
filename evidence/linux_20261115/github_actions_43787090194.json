@@ -1,0 +1,61 @@
+{
+  "run": {
+    "id": 43787090194,
+    "head_sha": "afb180c3bd0dee24a28aac8093bd4f74565b640a",
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-11-16T01:34:53Z",
+    "updated_at": "2026-11-16T01:35:39Z",
+    "html_url": "https://github.com/xiyu797-hash/StoneKV/actions/runs/43787090194"
+  },
+  "jobs": [
+    {
+      "name": "build (gcc, Debug)",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/xiyu797-hash/StoneKV/actions/runs/43787090194/job/133037049466",
+      "started_at": "2026-11-16T01:34:55Z",
+      "completed_at": "2026-11-16T01:35:27Z"
+    },
+    {
+      "name": "thread-sanitizer",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/xiyu797-hash/StoneKV/actions/runs/43787090194/job/133037049500",
+      "started_at": "2026-11-16T01:34:55Z",
+      "completed_at": "2026-11-16T01:35:35Z"
+    },
+    {
+      "name": "build (gcc, Release)",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/xiyu797-hash/StoneKV/actions/runs/43787090194/job/133037049545",
+      "started_at": "2026-11-16T01:34:55Z",
+      "completed_at": "2026-11-16T01:35:28Z"
+    },
+    {
+      "name": "build (clang, Debug)",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/xiyu797-hash/StoneKV/actions/runs/43787090194/job/133037049582",
+      "started_at": "2026-11-16T01:34:56Z",
+      "completed_at": "2026-11-16T01:35:37Z"
+    },
+    {
+      "name": "build (clang, Release)",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/xiyu797-hash/StoneKV/actions/runs/43787090194/job/133037049640",
+      "started_at": "2026-11-16T01:34:55Z",
+      "completed_at": "2026-11-16T01:35:25Z"
+    },
+    {
+      "name": "sanitizers",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/xiyu797-hash/StoneKV/actions/runs/43787090194/job/133037049681",
+      "started_at": "2026-11-16T01:34:55Z",
+      "completed_at": "2026-11-16T01:35:38Z"
+    }
+  ]
+}

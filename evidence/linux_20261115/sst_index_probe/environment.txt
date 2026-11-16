@@ -1,0 +1,8 @@
+date
+2026-11-15T22:09:53+08:00
+Linux ubuntu-MS-7E12 6.11.0-19-generic #19~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Mon Feb 17 11:51:52 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+CPU(s):                               24
+Model name:                           AMD Ryzen 9 9900X 12-Core Processor
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p4  3.6T  3.4T   68G  99% /
+count=20000 reads=5000 seed=42 value_bytes=256; separate DB; sync_writes=0 then Flush; shared host

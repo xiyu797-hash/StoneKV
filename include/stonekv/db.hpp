@@ -11,12 +11,15 @@
 namespace stonekv {
 
 // V1 is a Linux-only, single-process LSM-inspired KV store.
-// Multiple threads may call DB concurrently; all DB operations are serialized.
+// Multiple threads may call DB concurrently; public state transitions are
+// serialized, while the background worker builds an immutable SST outside the lock.
 // The caller must keep DB alive until its threads finish.
 struct Options {
     std::size_t memtable_max_bytes = 4U * 1024U * 1024U;
     std::size_t compaction_trigger = 4;
     bool sync_writes = true;  // default: fsync each WAL mutation before returning
+    // Maximum cached block payload bytes; zero disables the block cache.
+    std::size_t block_cache_capacity_bytes = 8U * 1024U * 1024U;
 };
 
 // A WriteBatch is atomically replayed from one WAL record.
@@ -35,6 +38,18 @@ struct Stats {
     std::size_t memtable_bytes = 0;
     std::size_t sstable_count = 0;
     std::uint64_t wal_bytes = 0;
+    // Per-process successful full compactions since this DB instance opened.
+    std::uint64_t compaction_count = 0;
+    std::uint64_t compaction_micros = 0;
+    std::uint64_t compaction_output_bytes = 0;
+    std::size_t background_tasks = 0;
+    std::size_t block_cache_bytes = 0;
+    std::uint64_t block_cache_hits = 0;
+    std::uint64_t block_cache_misses = 0;
+    std::size_t sst_full_index_entries = 0;
+    std::size_t sst_sparse_blocks = 0;
+    // Maximum number of outstanding flush/compaction slots, including running jobs.
+    std::size_t background_tasks_peak = 0;
 };
 
 class DB final {
@@ -58,9 +73,13 @@ public:
         const std::string& begin = "", const std::string& end = "",
         std::size_t limit = 100) const;
 
-    // Flush is a durability boundary for sync_writes=false mode.
+    // Flush waits for all preceding writes to reach a committed SST and is a
+    // durability boundary for sync_writes=false mode. Background I/O failures
+    // poison the instance; close and reopen after investigating the error.
     void Flush();
-    void Compact();  // synchronous full compaction (all current SSTables)
+    // Wait for a full compaction submitted to the background worker. Other
+    // clients may continue reads and writes while the merged SST is built.
+    void Compact();
     Stats GetStats() const;
 
 private:

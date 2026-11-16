@@ -1,0 +1,20 @@
+COMMAND: ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ctest --test-dir /tmp/stonekv_block_cache_asan_20261115 --output-on-failure
+Internal ctest changing into directory: /tmp/stonekv_block_cache_asan_20261115
+Test project /tmp/stonekv_block_cache_asan_20261115
+    Start 1: stonekv_core
+1/6 Test #1: stonekv_core .....................   Passed    2.21 sec
+    Start 2: stonekv_io_faults
+2/6 Test #2: stonekv_io_faults ................   Passed    0.34 sec
+    Start 3: stonekv_background_flush
+3/6 Test #3: stonekv_background_flush .........   Passed    0.32 sec
+    Start 4: stonekv_background_compaction
+4/6 Test #4: stonekv_background_compaction ....   Passed    0.11 sec
+    Start 5: stonekv_sstable_handle_cache
+5/6 Test #5: stonekv_sstable_handle_cache .....   Passed    0.53 sec
+    Start 6: stonekv_sstable_block_cache
+6/6 Test #6: stonekv_sstable_block_cache ......   Passed    0.08 sec
+
+100% tests passed, 0 tests failed out of 6
+
+Total Test time (real) =   3.59 sec
+EXIT_CODE=0

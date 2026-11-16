@@ -1,5 +1,7 @@
 # StoneKV v1.0 — C++17/Linux 本地持久化 KV 引擎
 
+> 后台 Flush：一个有界 immutable MemTable 由工作线程生成 SST；写入背压、WAL 回收与关闭语义见 [后台 Flush 设计](docs/BACKGROUND_FLUSH.md)。Compaction 由同一后台工作线程调度，调用方等待其完成；SST V3 使用持久化 Bloom、块级稀疏索引和有界 block cache；分段 WAL 尚未实现。V3 Scan 使用逐块游标；Compaction 当前仍会临时展开键偏移，峰值内存需关注。
+
 > 一个可编译、可运行、可故障注入和可测试的 **LSM-inspired（LSM 思想）教学/求职项目**，不是 RocksDB 替代品。项目由独立文件格式、WAL + fsync、MemTable、SSTable、Bloom Filter、原子 MANIFEST、同步全量 Compaction 构成。请先运行测试，再根据自己的理解决定是否写入简历。
 
 ## 1. 项目能力
@@ -9,8 +11,8 @@
 | API | ✅ | `Put / Get / Delete / Scan / Flush / Compact / GetStats`，二进制键值 |
 | WAL | ✅ | `SKW1` 记录、单调 seq、CRC32、尾部不完整记录截断；中间 CRC 错误拒绝开启 |
 | 持久化 | ✅ | 默认每次写入后 `fsync(WAL)`；SST 与 MANIFEST 均 `fsync + rename + fsync(dir)` |
-| MemTable | ✅ | `std::map` 有序索引，超过内存阈值同步刷盘 |
-| SSTable | ✅ | Immutable sorted file，记录级 CRC、内存全量 **key-offset 索引**，按需读取值 |
+| MemTable | ✅ | `std::map` 有序索引，超过内存阈值冻结并后台刷盘 |
+| SSTable | ✅ | V3 block framing（block/记录/元数据 CRC，兼容读取 V1/V2）、块级稀疏索引与持久化 Bloom，按需读取值 |
 | Bloom Filter | ✅ | 每文件内存常驻、约 10 bits/key、7 轮哈希（启动时重建，非持久化） |
 | 读取 / 范围查询 | ✅ | `Get` 从新到旧查；`Scan` 多路有序归并、尊重覆盖与 Tombstone |
 | Compaction | ✅ | 基于多路归并的**同步全量合并**，完成后清理旧 SST；非 leveled compaction |
@@ -22,8 +24,8 @@
 
 ## 1.1 工程增强分支说明（待合并）
 
-- `WriteBatch`：在一条 `SKB1` WAL 记录中提交最多 4096 个操作、最多 32 MiB 编码载荷；重放时整批验证 CRC 后才应用。同一键多次操作以最后一次为准。**保证记录重放原子性，不提供快照隔离/MVCC**。
-- 全量 Compaction 使用每个 SST 一个只读文件句柄，避免为每个 key 单独 open/close；尚未在服务器上形成配对性能结论。
+- `WriteBatch`：在一条 `SKB2` WAL 记录中提交最多 4096 个操作、最多 32 MiB 编码载荷；重放时整批验证 CRC 后才应用。同一键多次操作以最后一次为准。**保证记录重放原子性，不提供快照隔离/MVCC**。
+- SST 点查和扫描复用最多32个只读文件句柄（LRU），全量 Compaction 使用每个源 SST 一个独立只读句柄；尚未就此优化形成隔离配对性能结论。
 - 新增 5 个批量写入边界/损坏/崩溃测试，CI 覆盖 GCC/Clang Release 及 GCC ASan/UBSan。
 - 服务器复现实验见 [`docs/SERVER_TASKBOOK.md`](docs/SERVER_TASKBOOK.md) 和 `scripts/server_validation.sh`。
 
@@ -108,6 +110,7 @@ data/
 - Key 1..4096 bytes；Value 0..8 MiB；支持 `\0`、二进制字节，空 value 与 NotFound 严格区分。
 - `Scan(begin,end,limit)` 按字节序升序返回半开区间 `[begin,end)`；`end=""` 表示不设置上界；默认上限 100，最大 100000。
 - `Delete` 写 Tombstone，并不会立即移除文件里的旧值；全量 Compaction 安全删除被覆盖旧版本。
+- 新写入使用 `SKW2`/`SKB2`，头部有独立 CRC；可重放旧版 `SKW1`/`SKB1`。旧二进制无法读取包含 V2 记录的 WAL，降级前必须先完成 Flush 并备份。旧 V1 的长度损坏与未完成尾部不可可靠区分；即使 V2 的头完整，已确认数据后续被物理截断与未确认写入的撕裂尾部也不可仅凭该格式区分。
 - 若打开时发现 WAL **尾部不完整**，只截断最后不完整片段；已完整的记录 CRC 错误则抛异常，**不静默跳过**。SST CRC 错误亦拒绝打开。
 - 操作返回成功时：默认 `sync_writes=true` 表示 WAL 已 `fsync`，但并非跨设备/主机复制或断电级别的全系统保证。
 - `sync_writes=false` 适合基准测试/临时数据，不提供每次操作的可靠落盘确认。`Flush()` 成功会确保此前的 MemTable 已持久化。
@@ -127,3 +130,11 @@ data/
 ## 6. 注意事项
 
 StoneKV 是一个**独立可运行的基础版存储引擎**。它可以作为 Linux C++ 求职时展示文件 IO、异常恢复、数据结构、并发保护的起点，但没有可复现的复杂工作负载、长时间断电实验和真实业务接入之前，不应宣称工业级数据库或达到 RocksDB 水平。项目完成不等于已经掌握，建议先手写 WAL 编码、恢复和两路 SST 归并，再参加相关面试。
+
+### 结构化状态与工具限制
+
+`stonekv_cli <db_dir> stats-json` 输出一条可解析 JSON 的状态快照，不包含键、值或数据库路径；后台任务、缓存与 Compaction 计数是**当前 DB 实例**内的计数，CLI 每次打开新实例，因此不是跨进程持久统计或事件日志。缓存配置 `block_cache_capacity_bytes` 接受0至256 MiB；0禁用。
+
+当前服务器的 GCC ThreadSanitizer 构建成功，但测试运行发生 `FATAL: ThreadSanitizer: unexpected memory mapping`，并非通过；原始输出在 `evidence/linux_20261115/tsan_20261116.txt`。远端 [GitHub Actions](https://github.com/xiyu797-hash/StoneKV/actions/runs/43787308265) 的独立 TSan job 对提交 `1e0c687` 通过，后续提交的状态以 Actions 页面为准。ASan/UBSan 是独立配置，不能与 TSan 同时开启。
+
+CLI 可设置 `STONEKV_LOG_JSON=1` 输出逐行 JSON 运行日志到 stderr，stdout 的命令结果和退出码保持原有接口；支持 start、error、end 事件、操作名、Unix 毫秒、总耗时及退出码。日志不记录操作键值；错误诊断可能包含文件路径。为确保任意字节产生合法 JSON，非 ASCII 诊断字节以 `\\u00xx` 形式转义。设置值只允许 `0` 或 `1`。这些事件描述 CLI 单次调用，不代表后台任务的逐事件追踪；Compaction 等统计可通过 `stats-json` 查询。

@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-11-16T09:33:05.218133+08:00",
+  "platform": "Linux-6.11.0-19-generic-x86_64-with-glibc2.39",
+  "machine": "x86_64",
+  "python": "3.12.7 | packaged by Anaconda, Inc. | (main, Oct  4 2024, 13:27:36) [GCC 11.2.0]",
+  "cpu_count": 24,
+  "disk_free_bytes_at_start": 71364808704,
+  "git_head": {
+    "exit_code": 0,
+    "stdout": "6a94f1ddd5335a0347fdd41f18ec1d80ba380630\n",
+    "stderr": ""
+  },
+  "git_status": {
+    "exit_code": 0,
+    "stdout": "## feat/linux-reliability-engineering-20261115\n M docs/RESUME_CLAIMS.md\n M docs/SERVER_TASKBOOK.md\n M evidence/linux_20261115/sst_index_probe/REPORT.md\n?? evidence/io_fault_regression_20261115/\n?? evidence/linux_20261115/REPORT_20261116.md\n?? evidence/linux_20261115/crash_stress_1000_20261116.txt\n?? evidence/linux_20261115/crash_stress_2000_20261116.txt\n?? evidence/linux_20261115/crash_stress_500_20261116.txt\n?? evidence/linux_20261115/delivery_asan_20261116.txt\n?? evidence/linux_20261115/delivery_benchmark_20261116.txt\n?? evidence/linux_20261115/delivery_release_20261116.txt\n?? evidence/linux_20261115/final_asan_ctest_20261116.txt\n?? evidence/linux_20261115/final_release_ctest_20261116.txt\n?? evidence/linux_20261115/random_fault_200_repeat_20261116.txt\n?? evidence/linux_20261115/random_fault_asan_ctest_20261116.txt\n?? evidence/linux_20261115/random_fault_release_ctest_20261116.txt\n?? evidence/linux_20261115/scan_bounds_green_20261116.txt\n?? evidence/linux_20261115/scan_bounds_red_20261116.txt\n?? evidence/linux_20261115/scan_final_asan_ctest_20261116.txt\n?? evidence/linux_20261115/scan_final_release_ctest_20261116.txt\n?? evidence/linux_20261115/scan_pair_20261116/\n?? evidence/linux_20261115/workloads_delivery_20261116/\n?? evidence/linux_20261115/workloads_ioprofile_20261116/\n?? evidence/linux_20261115/workloads_peak_20261116/\n?? evidence/linux_20261115/workloads_scan_20261116.txt\n?? evidence/linux_20261115/workloads_scan_20261116/\n?? evidence/linux_20261115/workloads_stats_20261116/\n",
+    "stderr": ""
+  },
+  "binary": "/tmp/stonekv_scan_final_release_20261116/stonekv_benchmark_workloads",
+  "count": 200,
+  "seed": 42,
+  "rounds": 3,
+  "threads": 4,
+  "notes": [
+    "Each mode/round gets a new DB; input seed and parameters fixed.",
+    "sync=0 has no durable acknowledgement before Flush; never combine with sync=1.",
+    "Latency is API wall time; concurrent samples include lock contention and scheduling.",
+    "P50/P95/P99 use nearest-rank on per-operation samples, not averaged round percentiles.",
+    "Per-instance statistics, where present, are observed after workloads and before close, repeated on each phase row. Outstanding-task peak includes running tasks; read/write syscall amplification requires the separately instrumented binary.",
+    "CPU percent is whole-process user+system divided by wall time; 100% means one core. It is repeated on phase rows, not measured per phase. A 0.00s CPU or wall measurement is reported as unavailable due to timer precision.",
+    "Whole-process max RSS and final DB file bytes are not index-only memory or peak disk usage."
+  ]
+}

@@ -1,0 +1,13 @@
+[PASS] basic_and_reopen
+[PASS] binary_values
+[PASS] ordered_scan
+[PASS] flush_and_reopen
+[PASS] compaction_and_tombstones
+[PASS] auto_compaction
+[PASS] input_and_exclusive_lock
+[PASS] torn_wal_tail
+[PASS] corrupt_wal_fails_closed
+[PASS] corrupt_sst_fails_closed
+[PASS] missing_manifest_fails_closed
+[PASS] corrupt_manifest_fails_closed
+[FAIL] manifest_trailing_garbage_fails_closed : expected exception: MANIFEST trailing garbage

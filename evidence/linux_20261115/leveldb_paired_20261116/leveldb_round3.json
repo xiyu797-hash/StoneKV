@@ -1,0 +1,21 @@
+{
+  "command": [
+    "/home/ubuntu/miniconda3/bin/python3",
+    "/home/ubuntu/xiyu/StoneKV_remote_20261115/scripts/run_benchmark_workloads.py",
+    "--binary",
+    "/tmp/stonekv_leveldb_benchmark_20261116",
+    "--output",
+    "/tmp/stonekv_leveldb_paired_final_20261116/leveldb_round3",
+    "--count",
+    "200",
+    "--rounds",
+    "1",
+    "--threads",
+    "4",
+    "--seed",
+    "42"
+  ],
+  "exit": 0,
+  "stdout": "sync0_round1 exit=0\nsync1_round1 exit=0\nPASS: /tmp/stonekv_leveldb_paired_final_20261116/leveldb_round3\n",
+  "stderr": ""
+}

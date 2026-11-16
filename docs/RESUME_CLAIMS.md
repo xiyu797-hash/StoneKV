@@ -1,26 +1,10 @@
-# 简历用语与验证边界
+# 简历表述与验证边界
 
-## 当前可基于源码/自动化测试陈述的事实
+实际经历必须由本人核对，不能把代码生成或参与测试直接写成本人独立设计和实现全部模块。以下是源码和测试能支持的项目事实，详细数据与条件见 [服务器报告](../evidence/linux_20261115/REPORT_20261116.md)。
 
-- C++17/Linux 实现 WAL、MemTable（std::map）、不可变 SST、Bloom Filter 与基于多路归并的同步全量 Compaction。
-- 采用 `fsync + rename + fsync(directory)` 提交 SST/MANIFEST，使用 `durable_seq` 支撑崩溃后的 WAL 去重重放。
-- 提供 `Put/Get/Delete/Scan` 接口、CLI、基准测试、独占文件锁和线程安全封装。
-- 单机测试包含 23 项核心用例（以实际本机测试日志为准），以及五种可复现的进程崩溃注入时序。
+- Linux C++17 本地 KV 原型，包含 WAL、WriteBatch、MemTable、SST、Bloom Filter、MANIFEST、删除标记和范围扫描。
+- 基于单后台工作线程、单 immutable 槽与写入背压完成后台 Flush 和全量 Compaction；SST 使用持久化稀疏索引、校验块、有限容量缓存和有限文件句柄复用。
+- WAL 使用记录校验及序列号，测试了进程异常退出、模拟写入与 fsync 故障后的恢复。2000 轮 SIGKILL 实验验证了 34,595 次已确认写入；它不证明断电或任意硬件故障下零丢失。
+- GCC Release 与 ASan/UBSan 的 CTest 各 11/11 通过；本机 TSan 因运行环境内存映射失败无法给出结果，远端 [GitHub Actions](https://github.com/xiyu797-hash/StoneKV/actions/runs/43787090194) 的 GCC/Clang、ASan/UBSan 和 TSan 任务均通过。
 
-## **暂时不要写入简历**的表述
-
-- “自主从零设计实现了工业级高性能数据库”——没有工业级长期运行和大规模测试证据。
-- “比 RocksDB 快 N 倍”——没有同配置的 RocksDB/LevelDB 测试。
-- “完整 Leveled LSM Tree / SST Block Cache / 高吞吐异步 Compaction”——此版本未实现。
-- “硬盘断电后 100% 不丢数据”——仅验证进程级 `_exit` 故障，不是完整断电验证。
-- “千万 QPS”——不能把无 fsync 的小样本/缓存命中峰值当作持续吞吐。
-
-## 等你亲自运行/理解之后，可参考的简历条目
-
-**StoneKV｜Linux C++ 持久化 KV 存储引擎**（C++17 / POSIX IO / WAL / CRC32 / SSTable / CMake）
-
-- 构建基于 WAL + 有序 MemTable + 不可变 SSTable 的本地 KV 存储，支持二进制键值、范围扫描和 Tombstone 覆盖逻辑；利用内存 key-offset 索引和 Bloom Filter 减少无效磁盘读取。
-- 设计 SST/MANIFEST 的 `fsync + 原子 rename` 提交顺序，利用 WAL 序号水位在重启后恢复未刷盘记录；实现多路归并全量 Compaction 及旧文件回收。
-- 基于 CTest 设计随机模型一致性、CRC 损坏拒绝、尾部 WAL 截断、并发读写和 5 类进程级故障注入；记录不同同步策略下的实验数据（**请添加你自己在目标环境测得的真实数据**）。
-
-使用前务必自己克隆/解压、编译、运行完整测试、画出关键恢复流程，并逐行读懂代码。代码生成和测试通过本身不等于你独立实现了全部模块；面试应准确陈述自己的实际工作。
+不要声称达到 RocksDB 生产成熟度或比 RocksDB 快；目前没有 RocksDB 对照。LevelDB 仅有报告所述的小规模共享服务器对照，范围扫描明显慢于 LevelDB，不能推断所有场景或隐藏退化。`sync_writes=0` 的吞吐不等价于每次写入都持久化。一次进程级崩溃实验和模拟 I/O 故障也不等于真实断电、文件系统、磁盘故障或长期线上可靠性验证。

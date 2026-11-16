@@ -2,6 +2,8 @@
 
 ## 数据路径
 
+下图为原同步实现的历史示意。当前 Flush 使用有界 immutable + 后台工作线程；精确锁与 WAL 回收语义见 [BACKGROUND_FLUSH.md](BACKGROUND_FLUSH.md)。Compaction 由单一后台工作线程执行，读取与新写入可在合并 SST 构建期间继续；显式 Compact 等待该任务结束。
+
 ```text
               Put / Delete (单进程 DB::mutex)
                           |
@@ -41,39 +43,33 @@
 3. **恢复有界重放**：`durable_seq` 表示已进入 MANIFEST 管辖 SST 的最大序号；重启后 WAL 中 `seq <= durable_seq` 的记录跳过，以避免写入被双重应用。
 4. **Compaction 先提交后回收**：新 SST 被 manifest 引用前，旧 SST 都仍在；成功提交后才删除旧文件，崩溃后孤儿文件由进程锁保护下清理。
 5. **删除是记录**：Tombstone 参与读取覆盖，只有所有旧 SST 一并合并时才安全移除。
-6. **仅一个 writer 实例**：`flock` 排除跨进程冲突；`std::mutex` 将所有进程内操作串行化。
+6. **仅一个 writer 实例**：`flock` 排除跨进程冲突；`std::mutex` 串行化内存与 MANIFEST 状态转移，后台 SST 生成在锁外执行。
 
 ## WAL 格式（小端）
 
 ```
-Magic("SKW1")   4 bytes
+Magic("SKW2")   4 bytes
 Sequence       8 bytes
 Kind           1 byte  (1=put,2=delete)
 Key length     4 bytes
 Value length   4 bytes
 CRC32          4 bytes  (覆盖 seq+kind+klen+vlen+key+value)
+Header CRC32   4 bytes  (覆盖 magic 与之前完整头)
 Key            klen bytes
 Value          vlen bytes
 ```
 
-从 offset 0 扫描；不足一个 Header 或 Value 的最后记录视为意外中断，截断尾部后保留前面完整记录；若完整记录校验失败，拒绝启动（避免掩盖磁盘损坏）。
+批量记录使用 `SKB2`，在旧批量头后追加独立头 CRC，批内载荷仍使用原有 CRC 逐批验证。读取支持 `SKW1`/`SKB1` 与 V2 混合，但旧二进制不能读取 V2 WAL；降级前必须先 Flush 并备份。V2 在信任长度前验证完整头 CRC，防止已写入头部长度遭损坏后被误判为撕裂尾部。旧 V1 没有独立头 CRC，无法区分合理长度字段损坏和真正撕裂。所有版本中，完整合法头之后发生的尾部物理截断也无法区分未确认写入的中断和已确认数据被截断；当前策略截断不完整尾部，并不保证检测后者。完整记录 CRC 错误则拒绝启动。
 
 ## SST 格式（小端）
 
-```
-Magic("STONEKV1")  8 bytes
-Entry count        8 bytes
-Repeated entry:
-    Sequence       8 bytes
-    Kind           1 byte
-    Key length     4 bytes
-    Value length   4 bytes
-    CRC32          4 bytes (覆盖上述17字节+key+value)
-    Key            klen bytes
-    Value          vlen bytes
-```
+新写入 `STONEKV3`：8字节 magic、8字节记录数，然后重复 block：`u32 payload_length`、`u32 payload_crc32`、payload。目标 block 为64 KiB；单条较大记录可独占一个更大的 block，受 key/value 上限约束。payload 记录为 `seq:u64, kind:u8, klen:u32, vlen:u32, record_crc32:u32, key, value`。
 
-每个 SST 文件的键严格递增。启动时扫描 SST 校验 CRC 并重建**所有 key 的内存 offset index**和 Bloom Filter（布隆过滤器并未落盘）。ReadAt 按 offset 读取 Value 并再次验证 CRC。此实现没有 block cache；频繁随机读需要 open/read/close，读密集性能远不及成熟存储引擎。
+block 后是 `IDX3` 元数据：block 数、Bloom 的 bit/byte 数、各 block 的文件偏移/长度/首键，以及 Bloom 位数组；最后28字节是 `SKV3TAIL`、元数据偏移、长度及其CRC32。打开时验证 footer 边界、元数据CRC、稀疏首键及offset与各block一致，扫描所有记录校验 block/记录CRC、排序与 Bloom 不存在假阴性，再加载持久化 Bloom。元数据上限256 MiB。空 SST 不含 block，但含有效空 Bloom 与元数据。无法识别的版本、错误长度/校验及不匹配索引会拒绝打开。
+
+兼容读取 `STONEKV1`（记录直接顺序存放）和 `STONEKV2`（block framing，无尾部索引及 Bloom）。旧版二进制不能读取 V3；降级前必须备份，并用旧版本能识别的方式导出重建，本项目尚无自动降级工具。
+
+当前 V3 打开时仍扫描并验证全部记录，但只保留块首键、块偏移及持久化 Bloom，不常驻全量 key-offset 索引；点查按稀疏首键定位 block 后在块内查找。V1/V2 仍重建全量键索引。当前 Scan 使用每个 SST 最多一个块的稀疏游标并按范围定位；Compaction 仍会在操作期间临时展开 V3 全量键偏移，可能产生较高峰值内存，流式 Compaction 尚未实现。V2/V3 block 使用按载荷字节计量的 LRU，默认8 MiB、可配置0至256 MiB；超容量块不缓存，统计不包括容器元数据。V1 记录仍走原读取方式。最多32个 SST 只读描述符复用；Compaction 为源 SST 保持独立句柄。
 
 ## MANIFEST 格式及事务提交
 

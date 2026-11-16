@@ -1,0 +1,117 @@
+COMMAND: cmake -S . -B /tmp/stonekv_delivery_release_20261116 -DCMAKE_BUILD_TYPE=Release
+-- The CXX compiler identification is GNU 13.3.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE  
+-- Found Python3: /home/ubuntu/miniconda3/bin/python3 (found version "3.12.7") found components: Interpreter 
+-- Configuring done (1.9s)
+-- Generating done (0.1s)
+-- Build files have been written to: /tmp/stonekv_delivery_release_20261116
+CONFIG_EXIT=0
+COMMAND: cmake --build /tmp/stonekv_delivery_release_20261116 -j 4
+[  4%] Building CXX object CMakeFiles/stonekv.dir/src/db.cpp.o
+[  8%] Linking CXX static library libstonekv.a
+[  8%] Built target stonekv
+[ 20%] Building CXX object CMakeFiles/stonekv_benchmark_workloads.dir/tools/benchmark_workloads.cpp.o
+[ 20%] Building CXX object CMakeFiles/stonekv_bench.dir/tools/bench.cpp.o
+[ 20%] Building CXX object CMakeFiles/stonekv_sst_index_probe.dir/tools/sst_index_probe.cpp.o
+[ 25%] Building CXX object CMakeFiles/stonekv_cli.dir/tools/cli.cpp.o
+[ 29%] Linking CXX executable stonekv_cli
+[ 29%] Built target stonekv_cli
+[ 33%] Building CXX object CMakeFiles/stonekv_tests.dir/tests/test_db.cpp.o
+[ 37%] Linking CXX executable stonekv_sst_index_probe
+[ 37%] Built target stonekv_sst_index_probe
+[ 41%] Building CXX object CMakeFiles/stonekv_io_fault_tests.dir/tests/io_fault_regression.cpp.o
+[ 45%] Linking CXX executable stonekv_bench
+[ 45%] Built target stonekv_bench
+[ 50%] Building CXX object CMakeFiles/stonekv_background_flush_test.dir/tests/background_flush_test.cpp.o
+[ 54%] Linking CXX executable stonekv_benchmark_workloads
+[ 54%] Built target stonekv_benchmark_workloads
+[ 58%] Building CXX object CMakeFiles/stonekv_background_compaction_test.dir/tests/background_compaction_test.cpp.o
+[ 62%] Linking CXX executable stonekv_io_fault_tests
+[ 62%] Built target stonekv_io_fault_tests
+[ 66%] Building CXX object CMakeFiles/stonekv_sstable_handle_cache_test.dir/tests/sstable_handle_cache_test.cpp.o
+[ 70%] Linking CXX executable stonekv_background_flush_test
+[ 70%] Built target stonekv_background_flush_test
+[ 75%] Building CXX object CMakeFiles/stonekv_sstable_block_cache_test.dir/tests/sstable_block_cache_test.cpp.o
+[ 79%] Linking CXX executable stonekv_sstable_handle_cache_test
+[ 79%] Built target stonekv_sstable_handle_cache_test
+[ 83%] Building CXX object CMakeFiles/stonekv_crash_stress.dir/tests/crash_stress.cpp.o
+[ 87%] Linking CXX executable stonekv_background_compaction_test
+[ 87%] Built target stonekv_background_compaction_test
+[ 91%] Linking CXX executable stonekv_sstable_block_cache_test
+[ 91%] Built target stonekv_sstable_block_cache_test
+[ 95%] Linking CXX executable stonekv_crash_stress
+[ 95%] Built target stonekv_crash_stress
+[100%] Linking CXX executable stonekv_tests
+[100%] Built target stonekv_tests
+BUILD_EXIT=0
+COMMAND: ctest --test-dir /tmp/stonekv_delivery_release_20261116 --output-on-failure
+Internal ctest changing into directory: /tmp/stonekv_delivery_release_20261116
+Test project /tmp/stonekv_delivery_release_20261116
+    Start 1: stonekv_core
+1/8 Test #1: stonekv_core .....................   Passed    2.12 sec
+    Start 2: stonekv_io_faults
+2/8 Test #2: stonekv_io_faults ................   Passed    0.36 sec
+    Start 3: stonekv_background_flush
+3/8 Test #3: stonekv_background_flush .........   Passed    0.30 sec
+    Start 4: stonekv_background_compaction
+4/8 Test #4: stonekv_background_compaction ....   Passed    0.10 sec
+    Start 5: stonekv_sstable_handle_cache
+5/8 Test #5: stonekv_sstable_handle_cache .....   Passed    0.52 sec
+    Start 6: stonekv_sstable_block_cache
+6/8 Test #6: stonekv_sstable_block_cache ......   Passed    0.06 sec
+    Start 7: stonekv_crash_stress_smoke
+7/8 Test #7: stonekv_crash_stress_smoke .......   Passed    0.27 sec
+    Start 8: stonekv_cli_json
+8/8 Test #8: stonekv_cli_json .................   Passed    0.03 sec
+
+100% tests passed, 0 tests failed out of 8
+
+Total Test time (real) =   3.76 sec
+CTEST_EXIT=0
+COMMAND: /tmp/stonekv_delivery_release_20261116/stonekv_tests
+[PASS] wal_length_header_corruption_fails_closed
+[PASS] v2_magic_corruption_fails_closed
+[PASS] legacy_wal_mixed_version_replay
+[PASS] v2_incomplete_tail_preserves_prior_record
+[PASS] exhausted_sst_id_fails_closed
+[PASS] basic_and_reopen
+[PASS] binary_values
+[PASS] ordered_scan
+[PASS] flush_and_reopen
+[PASS] compaction_and_tombstones
+[PASS] auto_compaction
+[PASS] input_and_exclusive_lock
+[PASS] torn_wal_tail
+[PASS] corrupt_wal_fails_closed
+[PASS] block_sst_and_legacy_compatibility
+[PASS] block_sst_corruption_and_boundaries
+[PASS] corrupt_sst_fails_closed
+[PASS] missing_manifest_fails_closed
+[PASS] corrupt_manifest_fails_closed
+[PASS] manifest_trailing_garbage_fails_closed
+[PASS] missing_wal_fails_closed
+[PASS] max_key_edge
+[PASS] reopen_sequence_overwrite
+[PASS] cross_process_exclusive_lock
+[PASS] multi_thread
+[PASS] randomized_reference_model
+[PASS] crash_after_sst_rename
+[PASS] crash_after_manifest_rename
+[PASS] crash_after_wal_truncate
+[PASS] crash_during_compaction_before_commit
+[PASS] crash_during_compaction_after_commit
+[PASS] large_binary_value
+[PASS] batch_atomic_and_reopen
+[PASS] batch_validation
+[PASS] batch_torn_tail
+[PASS] batch_crc_fails_closed
+[PASS] batch_crash_replay
+ALL PASSED: 37/37
+INTERNAL_EXIT=0

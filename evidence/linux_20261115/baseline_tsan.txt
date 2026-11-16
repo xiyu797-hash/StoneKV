@@ -1,0 +1,42 @@
+COMMAND: cmake -S /tmp/stonekv_original_2318bb6_20261115 -B /tmp/stonekv_baseline_tsan_20261115 -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS=-fsanitize=thread -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread
+-- The CXX compiler identification is GNU 13.3.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE  
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /tmp/stonekv_baseline_tsan_20261115
+CONFIG_EXIT=0
+[ 12%] Building CXX object CMakeFiles/stonekv.dir/src/db.cpp.o
+[ 25%] Linking CXX static library libstonekv.a
+[ 25%] Built target stonekv
+[ 37%] Building CXX object CMakeFiles/stonekv_cli.dir/tools/cli.cpp.o
+[ 50%] Building CXX object CMakeFiles/stonekv_tests.dir/tests/test_db.cpp.o
+[ 62%] Building CXX object CMakeFiles/stonekv_bench.dir/tools/bench.cpp.o
+[ 75%] Linking CXX executable stonekv_cli
+[ 75%] Built target stonekv_cli
+[ 87%] Linking CXX executable stonekv_bench
+[ 87%] Built target stonekv_bench
+[100%] Linking CXX executable stonekv_tests
+[100%] Built target stonekv_tests
+BUILD_EXIT=0
+Internal ctest changing into directory: /tmp/stonekv_baseline_tsan_20261115
+Test project /tmp/stonekv_baseline_tsan_20261115
+    Start 1: stonekv_core
+1/1 Test #1: stonekv_core .....................***Failed    0.01 sec
+FATAL: ThreadSanitizer: unexpected memory mapping 0x5f94e1726000-0x5f94e172b000
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   0.01 sec
+
+The following tests FAILED:
+	  1 - stonekv_core (Failed)
+Errors while running CTest
+CTEST_EXIT=8

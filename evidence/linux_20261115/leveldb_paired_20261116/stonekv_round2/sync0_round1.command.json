@@ -1,0 +1,13 @@
+[
+  "/usr/bin/time",
+  "-o",
+  "/tmp/stonekv_leveldb_paired_final_20261116/stonekv_round2/sync0_round1.time",
+  "-f",
+  "wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M\nexit=%x",
+  "/tmp/stonekv_scan_final_release_20261116/stonekv_benchmark_workloads",
+  "/tmp/stonekv_leveldb_paired_final_20261116/stonekv_round2/sync0_round1",
+  "200",
+  "0",
+  "42",
+  "4"
+]

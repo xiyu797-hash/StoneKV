@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-11-16T09:46:55.505175+08:00",
+  "platform": "Linux-6.11.0-19-generic-x86_64-with-glibc2.39",
+  "machine": "x86_64",
+  "python": "3.12.7 | packaged by Anaconda, Inc. | (main, Oct  4 2024, 13:27:36) [GCC 11.2.0]",
+  "cpu_count": 24,
+  "disk_free_bytes_at_start": 71289028608,
+  "git_head": {
+    "exit_code": 0,
+    "stdout": "068b5b220999bb25ac56557f66a53e8d2a8dc3cf\n",
+    "stderr": ""
+  },
+  "git_status": {
+    "exit_code": 0,
+    "stdout": "## feat/linux-reliability-engineering-20261115\n?? evidence/io_fault_regression_20261115/io_fault_regression\n?? evidence/io_fault_regression_20261115/io_fault_regression_v2\n?? evidence/io_fault_regression_20261115/io_fault_regression_v3\n?? evidence/io_fault_regression_20261115/io_fault_regression_v4\n",
+    "stderr": ""
+  },
+  "binary": "/tmp/stonekv_leveldb_benchmark_20261116",
+  "count": 200,
+  "seed": 42,
+  "rounds": 1,
+  "threads": 4,
+  "notes": [
+    "Each mode/round gets a new DB; input seed and parameters fixed.",
+    "sync=0 has no durable acknowledgement before Flush; never combine with sync=1.",
+    "Latency is API wall time; concurrent samples include lock contention and scheduling.",
+    "P50/P95/P99 use nearest-rank on per-operation samples, not averaged round percentiles.",
+    "Per-instance statistics, where present, are observed after workloads and before close, repeated on each phase row. Outstanding-task peak includes running tasks; read/write syscall amplification requires the separately instrumented binary.",
+    "CPU percent is whole-process user+system divided by wall time; 100% means one core. It is repeated on phase rows, not measured per phase. A 0.00s CPU or wall measurement is reported as unavailable due to timer precision.",
+    "Whole-process max RSS and final DB file bytes are not index-only memory or peak disk usage."
+  ]
+}

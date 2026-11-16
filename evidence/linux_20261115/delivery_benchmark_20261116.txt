@@ -1,0 +1,11 @@
+COMMAND: python3 scripts/run_benchmark_workloads.py --binary /tmp/stonekv_delivery_release_20261116/stonekv_benchmark_workloads --output /tmp/stonekv_workloads_delivery_20261116 --count 200 --rounds 3 --threads 4 --seed 42
+2026-11-16T09:13:36+08:00
+sync0_round1 exit=0
+sync1_round1 exit=0
+sync1_round2 exit=0
+sync0_round2 exit=0
+sync0_round3 exit=0
+sync1_round3 exit=0
+PASS: /tmp/stonekv_workloads_delivery_20261116
+EXIT_CODE=0
+2026-11-16T09:13:41+08:00

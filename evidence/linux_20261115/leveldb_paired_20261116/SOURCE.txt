@@ -1,0 +1,14 @@
+LevelDB source: https://github.com/google/leveldb.git
+LevelDB commit: 29465588d3dfdc80fba5e198037582b8fdb5dd60
+StoneKV engine source: 6a94f1d (later CLI logging changes do not affect the workload binary)
+Adapter and paired runner: 068b5b2
+
+Executed successfully (exit code 0):
+GIT_TERMINAL_PROMPT=0 nice -n 10 git -c http.proxy= -c https.proxy= clone --depth 1 https://github.com/google/leveldb.git /tmp/stonekv_leveldb_reference_20261116
+cmake -S /tmp/stonekv_leveldb_reference_20261116 -B /tmp/stonekv_leveldb_build_20261116 -DCMAKE_BUILD_TYPE=Release -DLEVELDB_BUILD_TESTS=OFF -DLEVELDB_BUILD_BENCHMARKS=OFF
+nice -n 10 cmake --build /tmp/stonekv_leveldb_build_20261116 --parallel 2
+g++ -std=c++17 -O3 -DNDEBUG -pthread -DLEVELDB_PLATFORM_POSIX=1 -I tools/leveldb_adapter -I /tmp/stonekv_leveldb_reference_20261116/include -I /tmp/stonekv_leveldb_reference_20261116 -I /tmp/stonekv_leveldb_build_20261116/include tools/benchmark_workloads.cpp /tmp/stonekv_leveldb_build_20261116/libleveldb.a -o /tmp/stonekv_leveldb_benchmark_20261116
+python3 scripts/run_leveldb_comparison.py --stonekv /tmp/stonekv_scan_final_release_20261116/stonekv_benchmark_workloads --leveldb /tmp/stonekv_leveldb_benchmark_20261116 --output /tmp/stonekv_leveldb_paired_final_20261116 --count 200 --rounds 3 --threads 4 --seed 42
+44ad982a1172c5dd6e471e57ab9b17f5dc5deac8a05de85d21c3b6f6e4305f62  /tmp/stonekv_scan_final_release_20261116/stonekv_benchmark_workloads
+fc8b91bbf7baf02651c43b6a0112bdf7c0b3671ca186f223e9d98ae8fc82b111  /tmp/stonekv_leveldb_benchmark_20261116
+e8bce18e2ff773cd844183e00a852544c6d69761ba1b882d509ce8709f654614  /tmp/stonekv_leveldb_build_20261116/libleveldb.a

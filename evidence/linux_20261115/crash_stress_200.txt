@@ -1,0 +1,48 @@
+COMMAND: nice -n 10 /usr/bin/time -v /tmp/stonekv_stress_build_20261115/stonekv_crash_stress 200 /tmp/stonekv_crash_stress_200_20261115
+2026-11-15T22:12:38+08:00
+PASS round=0 acknowledged=20
+PASS round=10 acknowledged=208
+PASS round=20 acknowledged=393
+PASS round=30 acknowledged=569
+PASS round=40 acknowledged=766
+PASS round=50 acknowledged=940
+PASS round=60 acknowledged=1110
+PASS round=70 acknowledged=1286
+PASS round=80 acknowledged=1467
+PASS round=90 acknowledged=1622
+PASS round=100 acknowledged=1785
+PASS round=110 acknowledged=1986
+PASS round=120 acknowledged=2171
+PASS round=130 acknowledged=2331
+PASS round=140 acknowledged=2481
+PASS round=150 acknowledged=2621
+PASS round=160 acknowledged=2761
+PASS round=170 acknowledged=2970
+PASS round=180 acknowledged=3149
+PASS round=190 acknowledged=3284
+PASS cycles=200 acknowledged=3452 output="/tmp/stonekv_crash_stress_200_20261115"
+	Command being timed: "/tmp/stonekv_stress_build_20261115/stonekv_crash_stress 200 /tmp/stonekv_crash_stress_200_20261115"
+	User time (seconds): 3.45
+	System time (seconds): 0.62
+	Percent of CPU this job got: 29%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:13.93
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 6364
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 91737
+	Voluntary context switches: 23378
+	Involuntary context switches: 393
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 253232
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+EXIT_CODE=0
+2026-11-15T22:12:52+08:00

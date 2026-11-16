@@ -1,0 +1,13 @@
+phase,operations,wall_ns
+sequential_put,200,399956757
+flush_initial,1,10025794
+random_put,200,399950676
+random_get,200,203252
+range_scan,100,12083005
+overwrite,200,397688982
+delete,50,99987672
+flush_final,1,10074796
+compaction,1,9956513
+concurrent_mixed,200,202319525
+close,1,48341
+reopen,1,581434

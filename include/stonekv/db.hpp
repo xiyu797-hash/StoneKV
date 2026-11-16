@@ -48,6 +48,8 @@ struct Stats {
     std::uint64_t block_cache_misses = 0;
     std::size_t sst_full_index_entries = 0;
     std::size_t sst_sparse_blocks = 0;
+    // Maximum number of outstanding flush/compaction slots, including running jobs.
+    std::size_t background_tasks_peak = 0;
 };
 
 class DB final {

@@ -23,7 +23,7 @@ def disk_bytes(root):
 
 
 STAT_FIELDS = ('compaction_count', 'compaction_micros', 'compaction_output_bytes',
-               'background_tasks_snapshot', 'block_cache_bytes', 'block_cache_hits', 'block_cache_misses')
+               'background_tasks_snapshot', 'background_tasks_peak', 'block_cache_bytes', 'block_cache_hits', 'block_cache_misses')
 
 
 def read_stats(root):
@@ -32,9 +32,12 @@ def read_stats(root):
         # Older baseline executables have no statistics interface.
         return {name: None for name in STAT_FIELDS}
     data = json.loads(path.read_text(encoding='utf8'))
-    if any(type(data.get(name)) is not int or data[name] < 0 for name in STAT_FIELDS):
+    required = tuple(name for name in STAT_FIELDS if name != 'background_tasks_peak')
+    if (any(type(data.get(name)) is not int or data[name] < 0 for name in required)
+            or ('background_tasks_peak' in data and
+                (type(data['background_tasks_peak']) is not int or data['background_tasks_peak'] < 0))):
         raise ValueError(f'invalid workload statistics: {path}')
-    return {name: data[name] for name in STAT_FIELDS}
+    return {name: data.get(name) for name in STAT_FIELDS}
 
 
 def run():
@@ -68,7 +71,7 @@ def run():
                      'sync=0 has no durable acknowledgement before Flush; never combine with sync=1.',
                      'Latency is API wall time; concurrent samples include lock contention and scheduling.',
                      'P50/P95/P99 use nearest-rank on per-operation samples, not averaged round percentiles.',
-                     'Read/write amplification and peak background queue depth: NOT RUN. Per-instance statistics, where present, are a single snapshot after workloads and before close, repeated on each phase row.',
+                     'Per-instance statistics, where present, are observed after workloads and before close, repeated on each phase row. Outstanding-task peak includes running tasks; read/write syscall amplification requires the separately instrumented binary.',
                      'CPU percent is whole-process user+system divided by wall time; 100% means one core. It is repeated on phase rows, not measured per phase. A 0.00s CPU or wall measurement is reported as unavailable due to timer precision.',
                      'Whole-process max RSS and final DB file bytes are not index-only memory or peak disk usage.']}
     (root/'environment.json').write_text(json.dumps(env, indent=2)+'\n', encoding='utf8')

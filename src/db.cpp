@@ -574,6 +574,7 @@ struct DB::Impl {
     bool barrier{false};
     bool shutdown{false};
     bool compaction_pending{false};
+    std::size_t background_tasks_peak{0};
     std::uint64_t compaction_count{0};
     std::uint64_t compaction_micros{0};
     std::uint64_t compaction_output_bytes{0};
@@ -650,7 +651,13 @@ struct DB::Impl {
         immutable_seq = latest_seq;
         immutable_bytes = mem_bytes;
         mem_bytes = 0;
+        updateBackgroundPeakLocked();
         cv.notify_all();
+    }
+
+    void updateBackgroundPeakLocked() {
+        const auto outstanding = static_cast<std::size_t>(bool(immutable)) + static_cast<std::size_t>(compaction_pending);
+        background_tasks_peak = std::max(background_tasks_peak, outstanding);
     }
 
     void waitForWrite(std::unique_lock<std::mutex>& lock) {
@@ -706,7 +713,7 @@ struct DB::Impl {
                     if (::lseek(wal_fd.fd, 0, SEEK_END) < 0) fail(err("reset WAL position"));
                     maybeCrash("after_wal_truncate");
                 }
-                if (tables.size() >= opt.compaction_trigger) compaction_pending = true;
+                if (tables.size() >= opt.compaction_trigger) { compaction_pending = true; updateBackgroundPeakLocked(); }
                 if (!barrier && !shutdown && mem_bytes >= opt.memtable_max_bytes) freezeLocked();
                 cv.notify_all();
             } catch (const std::exception& e) {
@@ -1119,6 +1126,7 @@ struct DB::Impl {
             if (poisoned) fail("background flush failed: " + background_error);
             if (compact_after) {
                 compaction_pending = true;
+                updateBackgroundPeakLocked();
                 barrier = false; cv.notify_all();
                 cv.wait(lock, [this] { return poisoned || !compaction_pending; });
                 if (poisoned) fail("background compaction failed: " + background_error);
@@ -1135,7 +1143,7 @@ struct DB::Impl {
         return {latest_seq, manifest.durable_seq, mem.size() + (immutable ? immutable->size() : 0),
                 mem_bytes + immutable_bytes, tables.size(), fileSize(wal_fd.fd), compaction_count,
                 compaction_micros, compaction_output_bytes, static_cast<std::size_t>(bool(immutable)) + static_cast<std::size_t>(compaction_pending),
-                block_cache_bytes, block_cache_hits, block_cache_misses, full_entries, sparse_blocks};
+                block_cache_bytes, block_cache_hits, block_cache_misses, full_entries, sparse_blocks, background_tasks_peak};
     }
     std::vector<std::pair<std::string, std::string>> scan(
         const std::string& begin, const std::string& end, std::size_t limit) const {

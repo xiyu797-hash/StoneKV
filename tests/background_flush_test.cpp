@@ -45,10 +45,13 @@ int main(){
     db.Put("frozen",std::string(1500,'a'));
     auto deadline=std::chrono::steady_clock::now()+5s;while(!entered && std::chrono::steady_clock::now()<deadline)std::this_thread::sleep_for(1ms);
     if(!entered){release_sst=true;throw std::runtime_error("worker did not enter fsync");}
+    const auto outstanding=db.GetStats();
+    if(outstanding.background_tasks!=1 || outstanding.background_tasks_peak!=1){release_sst=true;throw std::runtime_error("background task statistics mismatch");}
     db.Put("active",std::string(1500,'b'));
     auto third=std::async(std::launch::async,[&]{db.Put("after","ok");});
     const bool waited=third.wait_for(200ms)==std::future_status::timeout;
     block_sst=false;release_sst=true;third.get();db.Flush();
+    if(db.GetStats().background_tasks_peak<1)throw std::runtime_error("background task peak was lost");
     if(!waited || db.Get("frozen")!=std::string(1500,'a') || db.Get("active")!=std::string(1500,'b') || db.Get("after")!="ok")throw std::runtime_error("backpressure failed");
   }
   // Crash after later WAL ACK while an older immutable table has not been

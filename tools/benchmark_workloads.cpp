@@ -66,8 +66,7 @@ int main(int argc, char** argv) {
       for(auto& v:per) data.insert(data.end(),v.begin(),v.end());
     });
 #ifdef STONEKV_EXTENDED_STATS
-    // Outside measured phases: per-instance counters and one queue snapshot,
-    // not a queue maximum and not the total physical I/O amplification.
+    // Outside measured phases: per-instance counters, not physical I/O.
     const auto observed=db->GetStats();
     std::ofstream stats(root/"stats.json");
     if(!stats)throw std::runtime_error("cannot create stats.json");
@@ -75,6 +74,7 @@ int main(int argc, char** argv) {
          <<",\"compaction_micros\":"<<observed.compaction_micros
          <<",\"compaction_output_bytes\":"<<observed.compaction_output_bytes
          <<",\"background_tasks_snapshot\":"<<observed.background_tasks
+         <<",\"background_tasks_peak\":"<<observed.background_tasks_peak
          <<",\"block_cache_bytes\":"<<observed.block_cache_bytes
          <<",\"block_cache_hits\":"<<observed.block_cache_hits
          <<",\"block_cache_misses\":"<<observed.block_cache_misses<<"}\n";

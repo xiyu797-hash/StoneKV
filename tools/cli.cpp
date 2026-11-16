@@ -56,6 +56,7 @@ int main(int argc, char** argv) {
                       << ",\"compaction_micros\":" << s.compaction_micros
                       << ",\"compaction_output_bytes\":" << s.compaction_output_bytes
                       << ",\"background_tasks\":" << s.background_tasks
+                      << ",\"background_tasks_peak\":" << s.background_tasks_peak
                       << ",\"block_cache_bytes\":" << s.block_cache_bytes
                       << ",\"block_cache_hits\":" << s.block_cache_hits
                       << ",\"block_cache_misses\":" << s.block_cache_misses

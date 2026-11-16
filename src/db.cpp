@@ -570,16 +570,6 @@ Manifest readManifest(const fs::path& dir) {
     return m;
 }
 
-struct SourceEntry {
-    std::string key;
-    std::uint64_t seq;
-    bool deleted;
-    std::size_t source; // 0: memtable; >=1: table index+1
-    std::size_t index;
-};
-struct KeyGreater {
-    bool operator()(const SourceEntry& a, const SourceEntry& b) const { return a.key > b.key; }
-};
 } // namespace
 
 struct DB::Impl {
@@ -1057,42 +1047,38 @@ struct DB::Impl {
             if (fd.fd < 0) fail(err("open compaction source SST"));
             readers.push_back(std::move(fd));
         }
-        // The persistent V3 index stays sparse in the open DB. This initial
-        // merge implementation materializes V3 key offsets only for the
-        // duration of compaction; a streaming cursor can remove this peak.
-        std::vector<std::vector<IndexEntry>> temporary_indexes(tables.size());
-        for (std::size_t i = 0; i < tables.size(); ++i) {
-            if (!tables[i].sparse_index) continue;
-            for (const auto& block : tables[i].sparse_blocks) {
-                auto entries = readSparseBlockIndex(block, readers[i].fd);
-                temporary_indexes[i].insert(temporary_indexes[i].end(),
-                    std::make_move_iterator(entries.begin()), std::make_move_iterator(entries.end()));
-            }
-        }
-        std::priority_queue<SourceEntry, std::vector<SourceEntry>, KeyGreater> pq;
-        auto push = [&](std::size_t src, std::size_t pos) {
+        // A V3 cursor retains one verified block index per source. Queue nodes
+        // own their entries: advancing a cursor may release its previous block.
+        struct Cursor { std::size_t block=0, pos=0; std::vector<IndexEntry> entries; };
+        struct Node { IndexEntry item; std::size_t source; };
+        struct Greater { bool operator()(const Node& a,const Node& b) const { return a.item.key>b.item.key; } };
+        std::vector<Cursor> cursors(tables.size());
+        std::priority_queue<Node, std::vector<Node>, Greater> pq;
+        auto push = [&](std::size_t src) {
             const auto& table = tables[src];
-            const auto& index = table.sparse_index ? temporary_indexes[src] : table.index;
-            if (pos < index.size()) {
-                const auto& item = index[pos];
-                pq.push({item.key, item.seq, item.deleted, src + 1, pos});
+            auto& cursor = cursors[src];
+            if (table.sparse_index) {
+                while (cursor.pos >= cursor.entries.size() && cursor.block < table.sparse_blocks.size()) {
+                    cursor.entries = readSparseBlockIndex(table.sparse_blocks[cursor.block++], readers[src].fd);
+                    cursor.pos = 0;
+                }
+                if (cursor.pos < cursor.entries.size()) pq.push({cursor.entries[cursor.pos++],src});
+            } else if (cursor.pos < table.index.size()) {
+                pq.push({table.index[cursor.pos++],src});
             }
         };
-        for (std::size_t i = 0; i < tables.size(); ++i) push(i, 0);
+        for (std::size_t i = 0; i < tables.size(); ++i) push(i);
         while (!pq.empty()) {
-            const auto key = pq.top().key;
-            SourceEntry best = pq.top();
-            while (!pq.empty() && pq.top().key == key) {
+            const auto key = pq.top().item.key;
+            Node best = pq.top();
+            while (!pq.empty() && pq.top().item.key == key) {
                 const auto curr = pq.top(); pq.pop();
-                if (curr.seq > best.seq) best = curr;
-                push(curr.source - 1, curr.index + 1);
+                if (curr.item.seq > best.item.seq) best = curr;
+                push(curr.source);
             }
             // Since all SSTables are merged, no older disk version can be exposed.
-            if (!best.deleted) {
-                const auto& tab = tables[best.source - 1];
-                const auto& index = tab.sparse_index ? temporary_indexes[best.source - 1] : tab.index;
-                writer.Append(key, readAt(tab, index[best.index], readers[best.source - 1].fd));
-            }
+            if (!best.item.deleted)
+                writer.Append(key, readAt(tables[best.source], best.item, readers[best.source].fd));
         }
         writer.Finish();
         maybeCrash("after_compaction_sst_rename");

@@ -119,6 +119,27 @@ void compaction() {
     stonekv::DB db(t.path.string());
     require(!db.Get("a") && db.Get("b") == "present", "compaction reopen");
 }
+void streamingCompactionMultiBlock() {
+    Tmp t;
+    {
+        stonekv::DB db(t.path.string(), opt(8*1024*1024,100,false));
+        for(int i=0;i<1200;++i) db.Put("k"+std::to_string(i),std::string(128,'a'));
+        db.Flush();
+        for(int i=0;i<1200;++i) {
+            const auto k="k"+std::to_string(i);
+            if(i%3==0) db.Delete(k); else db.Put(k,std::string(128,'b'));
+        }
+        db.Flush();
+        require(db.GetStats().sst_sparse_blocks>=4,"multi-block fixture");
+        db.Compact();
+        for(int i=0;i<1200;++i) {
+            const auto value=db.Get("k"+std::to_string(i));
+            require(i%3==0 ? !value : value==std::string(128,'b'),"streaming compaction overlap");
+        }
+    }
+    stonekv::DB reopened(t.path.string());
+    require(reopened.Scan("","",2000).size()==800,"streaming compaction reopen");
+}
 void automaticCompaction() {
     Tmp t;
     stonekv::DB db(t.path.string(), opt(1024, 3));
@@ -582,7 +603,7 @@ int main() {
         {"v2_incomplete_tail_preserves_prior_record", v2IncompleteTailPreservesPriorRecord},
         {"exhausted_sst_id_fails_closed", exhaustedSstIdFailsClosed},
         {"basic_and_reopen", basic}, {"binary_values", binaryValues}, {"ordered_scan", scan},
-        {"flush_and_reopen", flushReopen}, {"compaction_and_tombstones", compaction},
+        {"flush_and_reopen", flushReopen}, {"compaction_and_tombstones", compaction}, {"streaming_compaction_multiblock", streamingCompactionMultiBlock},
         {"auto_compaction", automaticCompaction}, {"input_and_exclusive_lock", validationAndLock},
         {"torn_wal_tail", tornWalTail}, {"corrupt_wal_fails_closed", corruptWal},
         {"block_sst_and_legacy_compatibility", blockSstFormatAndLegacyCompatibility},

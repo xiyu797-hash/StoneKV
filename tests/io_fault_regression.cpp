@@ -6,6 +6,9 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <fstream>
+#include <map>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -57,9 +60,11 @@ extern "C" int __wrap_fsync(int fd) {
 }
 int main(int argc,char** argv) {
  try {
-    if(argc>2)throw std::runtime_error("usage: io_fault_regression [NEW_EMPTY_OUTPUT_DIRECTORY]");
+    if(argc>3)throw std::runtime_error("usage: io_fault_regression [NEW_EMPTY_OUTPUT_DIRECTORY [RANDOM_ROUNDS]]");
+    const int random_rounds=argc==3?std::stoi(argv[2]):20;
+    check(random_rounds>=0 && random_rounds<=10000,"random rounds must be 0..10000");
     fs::path base;
-    if(argc==2) {
+    if(argc>=2) {
       base=fs::absolute(argv[1]);
       check(fs::create_directory(base),"output directory already exists or could not be created");
     } else {
@@ -145,7 +150,53 @@ int main(int argc,char** argv) {
         std::cout<<"PASS "<<c.name<<" reopened; uncertain="<<(reopened.Get("uncertain")?"present":"absent")<<'\n';
       }
     }
-    std::cout<<"PASS all "<<cases.size()<<" I/O fault cases; fixtures="<<base<<'\n';
+    // Vary both the acknowledged reference-model history and the injected
+    // syscall/file/error. A failed mutation may appear after recovery, but a
+    // failed batch must remain all-or-nothing.
+    std::mt19937 rng(20261116);
+    std::ofstream random_log(base/"random_faults.csv");
+    check(bool(random_log),"cannot open random fault log");
+    random_log<<"round,seed,scenario,error,partial,acknowledged_ops,reference_keys,uncertain_present\n";
+    for(int round=0;round<random_rounds;++round) {
+      const auto path=base/("random_"+std::to_string(round));
+      const unsigned scenario=rng()%8U;
+      const int code=(rng()%2U)?EIO:ENOSPC;
+      const bool is_batch=scenario==2 || scenario==3;
+      const bool is_wal=scenario<4;
+      const bool is_sync=(scenario%2U)==1U;
+      const bool partial=!is_sync && (rng()%2U)!=0;
+      const char* target=is_wal?"active.wal":(scenario<6?".sst.tmp":"MANIFEST.tmp");
+      std::map<std::string,std::string> model;
+      const int operations=10+static_cast<int>(rng()%21U);
+      {
+        stonekv::Options opt; opt.memtable_max_bytes=1024*1024; opt.compaction_trigger=100; opt.sync_writes=true;
+        stonekv::DB db(path.string(),opt);
+        for(int i=0;i<operations;++i) {
+          const auto k="k"+std::to_string(rng()%25U);
+          if(rng()%4U==0) { db.Delete(k); model.erase(k); }
+          else { const auto v="v"+std::to_string(rng()); db.Put(k,v); model[k]=v; }
+        }
+        // Ensure flush always has data, including when all random operations deleted.
+        db.Put("model_anchor","committed"); model["model_anchor"]="committed";
+        inj={true,false,target,code,is_sync,partial,false,false,0};
+        if(!is_wal) must_throw([&]{db.Flush();},"random flush fault");
+        else if(is_batch) must_throw([&]{db.WriteBatch({{stonekv::BatchOperation::Type::Put,"uncertain_a","a"},{stonekv::BatchOperation::Type::Put,"uncertain_b","b"}});},"random batch fault");
+        else must_throw([&]{db.Put("uncertain_a","a");},"random WAL fault");
+        inj.active=false;
+        check(inj.seen,"random injection was not reached");
+        must_throw([&]{db.Put("post_failure","bad");},"random poisoned write");
+      }
+      stonekv::DB recovered(path.string());
+      const auto a=recovered.Get("uncertain_a"), b=recovered.Get("uncertain_b");
+      if(is_batch) check(bool(a)==bool(b),"random batch partially recovered");
+      if(a) model["uncertain_a"]="a";
+      if(b) model["uncertain_b"]="b";
+      const std::vector<std::pair<std::string,std::string>> expected(model.begin(),model.end());
+      check(recovered.Scan("","",1000)==expected,"random recovery differs from acknowledged reference model");
+      random_log<<round<<",20261116,"<<scenario<<','<<code<<','<<partial<<','<<operations+1<<','<<model.size()<<','<<bool(a)<<'\n';
+      random_log.flush(); check(bool(random_log),"random fault log write failed");
+    }
+    std::cout<<"PASS all "<<cases.size()<<" I/O fault cases and "<<random_rounds<<" random reference-model rounds; fixtures="<<base<<'\n';
     return 0;
  } catch(const std::exception& e) { inj.active=false; std::cerr<<"FAIL "<<e.what()<<'\n'; return 1; }
 }

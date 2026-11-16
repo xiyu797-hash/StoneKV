@@ -22,6 +22,21 @@ def disk_bytes(root):
     return sum(p.stat().st_size for p in root.rglob('*') if p.is_file())
 
 
+STAT_FIELDS = ('compaction_count', 'compaction_micros', 'compaction_output_bytes',
+               'background_tasks_snapshot', 'block_cache_bytes', 'block_cache_hits', 'block_cache_misses')
+
+
+def read_stats(root):
+    path = root / 'stats.json'
+    if not path.exists():
+        # Older baseline executables have no statistics interface.
+        return {name: None for name in STAT_FIELDS}
+    data = json.loads(path.read_text(encoding='utf8'))
+    if any(type(data.get(name)) is not int or data[name] < 0 for name in STAT_FIELDS):
+        raise ValueError(f'invalid workload statistics: {path}')
+    return {name: data[name] for name in STAT_FIELDS}
+
+
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, required=True)
@@ -53,7 +68,7 @@ def run():
                      'sync=0 has no durable acknowledgement before Flush; never combine with sync=1.',
                      'Latency is API wall time; concurrent samples include lock contention and scheduling.',
                      'P50/P95/P99 use nearest-rank on per-operation samples, not averaged round percentiles.',
-                     'Read amplification, write amplification, background queue depth and compaction bytes: NOT RUN (not exposed by API).',
+                     'Read/write amplification and peak background queue depth: NOT RUN. Per-instance statistics, where present, are a single snapshot after workloads and before close, repeated on each phase row.',
                      'CPU percent is whole-process user+system divided by wall time; 100% means one core. It is repeated on phase rows, not measured per phase. A 0.00s CPU or wall measurement is reported as unavailable due to timer precision.',
                      'Whole-process max RSS and final DB file bytes are not index-only memory or peak disk usage.']}
     (root/'environment.json').write_text(json.dumps(env, indent=2)+'\n', encoding='utf8')
@@ -79,6 +94,7 @@ def run():
                     k,v=line.split('=',1);timings[k]=v
             wall=float(timings['wall_seconds']);user=float(timings['user_seconds']);system=float(timings['system_seconds'])
             cpu=100*(user+system)/wall if wall>0 and user+system>0 else None
+            stats=read_stats(sample_dir)
             with (sample_dir/'latencies.csv').open(newline='') as f:
                 latency={}
                 for row in csv.DictReader(f): latency.setdefault(row['phase'],[]).append(int(row['latency_ns']))
@@ -90,7 +106,7 @@ def run():
                     'ops_per_second':count*1e9/wall_ns,'p50_us':percentile(values,.50)/1000,
                     'p95_us':percentile(values,.95)/1000,'p99_us':percentile(values,.99)/1000,
                     'process_cpu_single_core_percent':cpu,'process_max_rss_kib':int(timings['max_rss_kib']),
-                    'final_db_file_bytes':disk_bytes(sample_dir/'db')})
+                    'final_db_file_bytes':disk_bytes(sample_dir/'db'), **stats})
             with (root/'summary.csv').open('w',newline='') as f:
                 writer=csv.DictWriter(f,fieldnames=list(summary_rows[0]));writer.writeheader();writer.writerows(summary_rows)
     print(f'PASS: {root}',flush=True)

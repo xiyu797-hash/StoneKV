@@ -65,6 +65,21 @@ int main(int argc, char** argv) {
       if(failure) std::rethrow_exception(failure);
       for(auto& v:per) data.insert(data.end(),v.begin(),v.end());
     });
+#ifdef STONEKV_EXTENDED_STATS
+    // Outside measured phases: per-instance counters and one queue snapshot,
+    // not a queue maximum and not the total physical I/O amplification.
+    const auto observed=db->GetStats();
+    std::ofstream stats(root/"stats.json");
+    if(!stats)throw std::runtime_error("cannot create stats.json");
+    stats<<"{\"compaction_count\":"<<observed.compaction_count
+         <<",\"compaction_micros\":"<<observed.compaction_micros
+         <<",\"compaction_output_bytes\":"<<observed.compaction_output_bytes
+         <<",\"background_tasks_snapshot\":"<<observed.background_tasks
+         <<",\"block_cache_bytes\":"<<observed.block_cache_bytes
+         <<",\"block_cache_hits\":"<<observed.block_cache_hits
+         <<",\"block_cache_misses\":"<<observed.block_cache_misses<<"}\n";
+    stats.flush();if(!stats)throw std::runtime_error("stats write failed");
+#endif
     phase("close",[&]{measure("close","close",0,[&]{db.reset();});});
     phase("reopen",[&]{measure("reopen","open",0,[&]{db=std::make_unique<stonekv::DB>((root/"db").string(),opt);});});
     if(db->Get(key('s',0)) || db->Get(key('s',count-1))!=newer || db->Get(key('r',0))!=val)throw std::runtime_error("reopen verification mismatch");

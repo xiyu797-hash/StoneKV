@@ -1151,56 +1151,64 @@ struct DB::Impl {
             if (!end.empty() && it->first >= end) break;
             mem_records.push_back(*it);
         }
-        // Scan currently materializes sparse V3 key offsets transiently;
-        // the open DB retains only block index entries between operations.
-        std::vector<std::vector<IndexEntry>> temporary_indexes(tables.size());
+        // A cursor retains at most one sparse block index per SST. Queue nodes
+        // own their entry so advancing into the next block cannot invalidate a
+        // duplicate-key candidate that is still being resolved.
+        struct Cursor { std::size_t block = 0, pos = 0; std::vector<IndexEntry> entries; };
+        struct Node { std::string key; std::uint64_t seq; bool deleted; std::size_t source, mem_index; IndexEntry item; };
+        struct Greater { bool operator()(const Node& a, const Node& b) const { return a.key > b.key; } };
+        std::vector<Cursor> cursors(tables.size());
         for (std::size_t i = 0; i < tables.size(); ++i) {
-            if (!tables[i].sparse_index) continue;
-            for (const auto& block : tables[i].sparse_blocks) {
-                auto entries = cachedSparseBlockIndex(tables[i], block);
-                temporary_indexes[i].insert(temporary_indexes[i].end(),
-                    std::make_move_iterator(entries.begin()), std::make_move_iterator(entries.end()));
+            const auto& table = tables[i]; auto& cursor = cursors[i];
+            if (!table.sparse_index) {
+                cursor.pos = static_cast<std::size_t>(std::lower_bound(table.index.begin(), table.index.end(), begin,
+                    [](const IndexEntry& e, const std::string& k) { return e.key < k; }) - table.index.begin());
+                continue;
             }
+            if (table.sparse_blocks.empty()) continue;
+            auto block = std::upper_bound(table.sparse_blocks.begin(), table.sparse_blocks.end(), begin,
+                [](const std::string& k, const SparseBlock& b) { return k < b.first_key; });
+            if (block != table.sparse_blocks.begin()) --block;
+            cursor.block = static_cast<std::size_t>(block - table.sparse_blocks.begin());
+            cursor.entries = cachedSparseBlockIndex(table, *block);
+            cursor.pos = static_cast<std::size_t>(std::lower_bound(cursor.entries.begin(), cursor.entries.end(), begin,
+                [](const IndexEntry& e, const std::string& k) { return e.key < k; }) - cursor.entries.begin());
         }
-        std::priority_queue<SourceEntry, std::vector<SourceEntry>, KeyGreater> pq;
-        auto push = [&](std::size_t src, std::size_t pos) {
+        std::priority_queue<Node, std::vector<Node>, Greater> pq;
+        std::size_t next_mem = 0;
+        auto push = [&](std::size_t src) {
             if (src == 0) {
-                if (pos >= mem_records.size()) return;
-                const auto& e = mem_records[pos];
-                pq.push({e.first, e.second.seq, e.second.deleted, src, pos});
-            } else {
-                const auto& table = tables[src - 1];
-                const auto& idx = table.sparse_index ? temporary_indexes[src - 1] : table.index;
-                if (pos >= idx.size()) return;
-                const auto& item = idx[pos];
-                if (!end.empty() && item.key >= end) return;
-                pq.push({item.key, item.seq, item.deleted, src, pos});
+                if (next_mem < mem_records.size()) {
+                    const auto index = next_mem++; const auto& e = mem_records[index];
+                    pq.push({e.first, e.second.seq, e.second.deleted, 0, index, {}});
+                }
+                return;
             }
+            const auto& table = tables[src - 1]; auto& cursor = cursors[src - 1];
+            if (table.sparse_index) {
+                while (cursor.pos >= cursor.entries.size() && !table.sparse_blocks.empty() && cursor.block + 1 < table.sparse_blocks.size()) {
+                    ++cursor.block; cursor.entries = cachedSparseBlockIndex(table, table.sparse_blocks[cursor.block]); cursor.pos = 0;
+                }
+            }
+            const auto& idx = table.sparse_index ? cursor.entries : table.index;
+            if (cursor.pos >= idx.size()) return;
+            const auto& item = idx[cursor.pos++];
+            if (!end.empty() && item.key >= end) return;
+            pq.push({item.key, item.seq, item.deleted, src, 0, item});
         };
-        push(0, 0);
-        for (std::size_t src = 1; src <= tables.size(); ++src) {
-            const auto& table = tables[src - 1];
-            const auto& idx = table.sparse_index ? temporary_indexes[src - 1] : table.index;
-            const auto it = std::lower_bound(idx.begin(), idx.end(), begin,
-                [](const IndexEntry& e, const std::string& k) { return e.key < k; });
-            push(src, static_cast<std::size_t>(it - idx.begin()));
-        }
+        for (std::size_t src = 0; src <= tables.size(); ++src) push(src);
         std::vector<std::pair<std::string, std::string>> result;
         while (!pq.empty() && result.size() < limit) {
             const auto key = pq.top().key;
-            SourceEntry best = pq.top();
+            Node best = pq.top();
             while (!pq.empty() && pq.top().key == key) {
-                auto curr = pq.top(); pq.pop();
+                Node curr = pq.top(); pq.pop();
                 if (curr.seq > best.seq) best = curr;
-                push(curr.source, curr.index + 1);
+                push(curr.source);
             }
             if (!best.deleted) {
-                if (best.source == 0) result.emplace_back(key, mem_records[best.index].second.value);
-                else {
-                    const auto& table = tables[best.source - 1];
-                    const auto& idx = table.sparse_index ? temporary_indexes[best.source - 1] : table.index;
-                    result.emplace_back(key, cachedRead(table, idx[best.index]).value);
-                }
+                if (best.source == 0) result.emplace_back(key, mem_records[best.mem_index].second.value);
+                else result.emplace_back(key, cachedRead(tables[best.source - 1], best.item).value);
             }
         }
         return result;

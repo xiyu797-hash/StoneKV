@@ -1,6 +1,6 @@
 # StoneKV v1.0 — C++17/Linux 本地持久化 KV 引擎
 
-> 后台 Flush：一个有界 immutable MemTable 由工作线程生成 SST；写入背压、WAL 回收与关闭语义见 [后台 Flush 设计](docs/BACKGROUND_FLUSH.md)。Compaction 由同一后台工作线程调度，调用方等待其完成；SST V3 使用持久化 Bloom、块级稀疏索引和有界 block cache；分段 WAL 尚未实现。V3 Scan/Compaction 当前会临时展开键偏移，峰值内存仍需关注。
+> 后台 Flush：一个有界 immutable MemTable 由工作线程生成 SST；写入背压、WAL 回收与关闭语义见 [后台 Flush 设计](docs/BACKGROUND_FLUSH.md)。Compaction 由同一后台工作线程调度，调用方等待其完成；SST V3 使用持久化 Bloom、块级稀疏索引和有界 block cache；分段 WAL 尚未实现。V3 Scan 使用逐块游标；Compaction 当前仍会临时展开键偏移，峰值内存需关注。
 
 > 一个可编译、可运行、可故障注入和可测试的 **LSM-inspired（LSM 思想）教学/求职项目**，不是 RocksDB 替代品。项目由独立文件格式、WAL + fsync、MemTable、SSTable、Bloom Filter、原子 MANIFEST、同步全量 Compaction 构成。请先运行测试，再根据自己的理解决定是否写入简历。
 

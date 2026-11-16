@@ -31,5 +31,12 @@ int main(){try{
   if(!db.Get("key0"))throw std::runtime_error("evicted block read mismatch");auto after=db.GetStats();
   if(after.block_cache_bytes>o.block_cache_capacity_bytes || after.block_cache_misses!=before.block_cache_misses+1)throw std::runtime_error("block LRU eviction mismatch");
  }
+ std::string t3="/tmp/stonekv-sparse-scan-XXXXXX";std::vector<char> p3(t3.begin(),t3.end());p3.push_back('\0');auto dir3=::mkdtemp(p3.data());if(!dir3)throw std::runtime_error("mkdtemp scan");
+ {stonekv::Options o;o.sync_writes=false;o.memtable_max_bytes=8*1024*1024;o.block_cache_capacity_bytes=0;stonekv::DB db(dir3,o);
+  for(int i=0;i<4000;++i){char key[32];std::snprintf(key,sizeof(key),"k%05d",i);db.Put(key,std::string(128,'x'));}db.Flush();reads=0;
+  const auto rows=db.Scan("k02000","",1);const auto scanned=reads.load();
+  if(rows.size()!=1 || rows[0].first!="k02000")throw std::runtime_error("bounded sparse scan mismatch");
+  if(scanned>4)throw std::runtime_error("bounded scan read unrelated blocks: "+std::to_string(scanned));
+ }
  std::cout<<"PASS block cache read reuse and invalidation fixture="<<dir<<'\n';return 0;
 }catch(const std::exception&e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}}

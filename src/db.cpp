@@ -1153,12 +1153,13 @@ struct DB::Impl {
         if (poisoned) fail("database has an uncertain I/O commit; close and reopen it");
         std::vector<std::pair<std::string, Record>> mem_records;
         std::map<std::string, Record> merged;
-        if (immutable) merged = *immutable;
-        for (const auto& kv : mem) merged.insert_or_assign(kv.first, kv.second);
-        for (auto it = merged.lower_bound(begin); it != merged.end(); ++it) {
-            if (!end.empty() && it->first >= end) break;
-            mem_records.push_back(*it);
-        }
+        const auto addRange = [&](const std::map<std::string, Record>& source) {
+            for (auto it=source.lower_bound(begin); it!=source.end() && (end.empty() || it->first<end); ++it)
+                merged.insert_or_assign(it->first, it->second);
+        };
+        if (immutable) addRange(*immutable);
+        addRange(mem); // active entries are newer than the immutable snapshot
+        for (const auto& kv : merged) mem_records.push_back(kv);
         // A cursor retains at most one sparse block index per SST. Queue nodes
         // own their entry so advancing into the next block cannot invalidate a
         // duplicate-key candidate that is still being resolved.

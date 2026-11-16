@@ -24,19 +24,20 @@ int main(){
  try{
   std::string tmp="/tmp/stonekv-bg-test-XXXXXX";std::vector<char> p(tmp.begin(),tmp.end());p.push_back('\0');char* dir=::mkdtemp(p.data());if(!dir)throw std::runtime_error("mkdtemp");
   { stonekv::Options o;o.memtable_max_bytes=1024;o.compaction_trigger=100;stonekv::DB db(dir,o);
+    db.Put("shared","old");
     block_sst=true;
     auto put=std::async(std::launch::async,[&]{db.Put("first",std::string(1500,'x'));});
     auto deadline=std::chrono::steady_clock::now()+5s;while(!entered.load() && std::chrono::steady_clock::now()<deadline)std::this_thread::sleep_for(1ms);
     bool saw=entered.load(); bool completed=put.wait_for(500ms)==std::future_status::ready;
     bool accessible=false;
-    if(completed){put.get();auto read=std::async(std::launch::async,[&]{db.WriteBatch({{stonekv::BatchOperation::Type::Put,"second","ok"},{stonekv::BatchOperation::Type::Delete,"gone",""}});return db.Get("first")==std::string(1500,'x') && db.Get("second")=="ok" && db.Scan().size()==2;});
+    if(completed){put.get();auto read=std::async(std::launch::async,[&]{db.WriteBatch({{stonekv::BatchOperation::Type::Put,"second","ok"},{stonekv::BatchOperation::Type::Put,"shared","new"},{stonekv::BatchOperation::Type::Delete,"gone",""}});const auto range=db.Scan("shared","t",10);return db.Get("first")==std::string(1500,'x') && db.Get("second")=="ok" && db.Scan().size()==3 && range.size()==1 && range[0].first=="shared" && range[0].second=="new";});
       if(read.wait_for(500ms)==std::future_status::ready)accessible=read.get(); else {release_sst=true;read.wait();}
     }
     release_sst=true; if(!completed)put.wait(); block_sst=false;
     if(!saw || !completed || !accessible)throw std::runtime_error("writes/reads blocked on SST fsync");
     db.Flush();
   }
-  {stonekv::DB db(dir);if(db.Get("first")!=std::string(1500,'x') || db.Get("second")!="ok")throw std::runtime_error("reopen mismatch");}
+  {stonekv::DB db(dir);if(db.Get("first")!=std::string(1500,'x') || db.Get("second")!="ok" || db.Get("shared")!="new")throw std::runtime_error("reopen mismatch");}
   // When both immutable and active are full, the next writer must wait until
   // the worker makes room; its WAL record must not be published early.
   std::string temp2="/tmp/stonekv-bg-pressure-XXXXXX"; std::vector<char> p2(temp2.begin(),temp2.end());p2.push_back('\0');char* dir2=::mkdtemp(p2.data());if(!dir2)throw std::runtime_error("mkdtemp pressure");

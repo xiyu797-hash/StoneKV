@@ -1,5 +1,10 @@
 # StoneKV server validation & production-gap taskbook
 
+> Historical taskbook for the earlier synchronous implementation. For the
+> 2026-11-16 branch status and measured evidence, see
+> [the current validation report](../evidence/linux_20261115/REPORT_20261116.md).
+> The status table below describes that earlier snapshot, not the current branch.
+
 **Scope:** This branch adds atomic WAL `WriteBatch`, reusable SST file handles during full compaction, five batch tests, and 3-job CI. It does **not** turn StoneKV into a production-ready replacement for RocksDB. Run all experiments on disposable data directories only.
 
 ## Execute on Ubuntu server (foreground)

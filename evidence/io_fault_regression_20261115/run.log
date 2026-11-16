@@ -1,0 +1,16 @@
+COMMAND: g++ -std=c++17 -O2 -pthread -Iinclude src/db.cpp tests/io_fault_regression.cpp -Wl,--wrap=write -Wl,--wrap=fsync -o evidence/io_fault_regression_20261115/io_fault_regression
+BUILD_EXIT=0
+COMMAND: evidence/io_fault_regression_20261115/io_fault_regression /tmp/stonekv_io_fault_20261115_2110
+PASS wal_write_enospc reopened; uncertain=absent
+PASS wal_write_eio reopened; uncertain=absent
+PASS wal_fsync_eio reopened; uncertain=present
+PASS batch_write_enospc reopened; uncertain=absent
+PASS batch_fsync_eio reopened; uncertain=absent
+PASS sst_write_enospc reopened; uncertain=absent
+PASS sst_write_eio reopened; uncertain=absent
+PASS sst_fsync_eio reopened; uncertain=absent
+PASS manifest_write_enospc reopened; uncertain=absent
+PASS manifest_write_eio reopened; uncertain=absent
+PASS manifest_fsync_eio reopened; uncertain=absent
+PASS all 11 I/O fault cases; fixtures="/tmp/stonekv_io_fault_20261115_2110"
+TEST_EXIT=0

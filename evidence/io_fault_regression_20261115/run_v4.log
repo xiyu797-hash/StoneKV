@@ -1,0 +1,24 @@
+COMMAND: g++ -std=c++17 -O2 -pthread -Iinclude src/db.cpp tests/io_fault_regression.cpp -Wl,--wrap=write -Wl,--wrap=fsync -o evidence/io_fault_regression_20261115/io_fault_regression_v4
+BUILD_EXIT=0
+COMMAND: evidence/io_fault_regression_20261115/io_fault_regression_v4
+PASS wal_write_enospc reopened; uncertain=absent
+PASS wal_write_eio reopened; uncertain=absent
+PASS wal_partial_write_eio reopened; uncertain=absent
+PASS wal_fsync_eio reopened; uncertain=present
+PASS batch_write_enospc reopened; uncertain=absent
+PASS batch_partial_write_eio reopened; uncertain=absent
+PASS batch_fsync_eio reopened; uncertain=absent
+PASS sst_write_enospc reopened; uncertain=absent
+PASS sst_write_eio reopened; uncertain=absent
+PASS sst_fsync_eio reopened; uncertain=absent
+PASS manifest_write_enospc reopened; uncertain=absent
+PASS manifest_write_eio reopened; uncertain=absent
+PASS manifest_fsync_eio reopened; uncertain=absent
+PASS sst_dir_fsync_eio reopened; uncertain=absent
+PASS manifest_dir_fsync_eio reopened; uncertain=absent
+PASS compact_sst_enospc reopened; uncertain=absent
+PASS compact_sst_fsync_eio reopened; uncertain=absent
+PASS compact_manifest_eio reopened; uncertain=absent
+PASS compact_manifest_dir_fsync_eio reopened; uncertain=absent
+PASS all 19 I/O fault cases; fixtures="/tmp/stonekv-io-fault-P5SgpS"
+TEST_EXIT=0

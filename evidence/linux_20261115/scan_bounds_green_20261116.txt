@@ -1,0 +1,35 @@
+Start testing: Nov 16 09:30 CST
+----------------------------------------------------------
+2/11 Testing: stonekv_scan_bounds
+2/11 Test: stonekv_scan_bounds
+Command: "/tmp/stonekv_scan_red_20261116/stonekv_scan_bounds_test"
+Directory: /tmp/stonekv_scan_red_20261116
+"stonekv_scan_bounds" start time: Nov 16 09:30 CST
+Output:
+----------------------------------------------------------
+allocations without unrelated keys=232 with unrelated keys=232
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"stonekv_scan_bounds" end time: Nov 16 09:30 CST
+"stonekv_scan_bounds" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/11 Testing: stonekv_background_flush
+4/11 Test: stonekv_background_flush
+Command: "/tmp/stonekv_scan_red_20261116/stonekv_background_flush_test"
+Directory: /tmp/stonekv_scan_red_20261116
+"stonekv_background_flush" start time: Nov 16 09:30 CST
+Output:
+----------------------------------------------------------
+PASS background flush progress and reopen; fixture=/tmp/stonekv-bg-test-c8PnC9
+<end of output>
+Test time =   0.32 sec
+----------------------------------------------------------
+Test Passed.
+"stonekv_background_flush" end time: Nov 16 09:30 CST
+"stonekv_background_flush" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Nov 16 09:30 CST

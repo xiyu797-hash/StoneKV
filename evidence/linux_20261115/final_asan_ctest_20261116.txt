@@ -1,0 +1,26 @@
+Internal ctest changing into directory: /tmp/stonekv_final_asan_20261116
+Test project /tmp/stonekv_final_asan_20261116
+      Start  1: stonekv_core
+ 1/10 Test  #1: stonekv_core .....................   Passed    4.11 sec
+      Start  2: stonekv_io_faults
+ 2/10 Test  #2: stonekv_io_faults ................   Passed    0.61 sec
+      Start  3: stonekv_background_flush
+ 3/10 Test  #3: stonekv_background_flush .........   Passed    0.36 sec
+      Start  4: stonekv_background_compaction
+ 4/10 Test  #4: stonekv_background_compaction ....   Passed    0.20 sec
+      Start  5: stonekv_sstable_handle_cache
+ 5/10 Test  #5: stonekv_sstable_handle_cache .....   Passed    1.02 sec
+      Start  6: stonekv_sstable_block_cache
+ 6/10 Test  #6: stonekv_sstable_block_cache ......   Passed    0.21 sec
+      Start  7: stonekv_crash_stress_smoke
+ 7/10 Test  #7: stonekv_crash_stress_smoke .......   Passed    0.40 sec
+      Start  8: stonekv_cli_json
+ 8/10 Test  #8: stonekv_cli_json .................   Passed    0.05 sec
+      Start  9: stonekv_benchmark_stats
+ 9/10 Test  #9: stonekv_benchmark_stats ..........   Passed    0.26 sec
+      Start 10: stonekv_io_profile
+10/10 Test #10: stonekv_io_profile ...............   Passed    0.13 sec
+
+100% tests passed, 0 tests failed out of 10
+
+Total Test time (real) =   7.35 sec

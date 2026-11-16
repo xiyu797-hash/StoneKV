@@ -14,3 +14,5 @@ Original source `2318bb65bc0d13b562dc1cee755355e6690c142f` versus V3 sparse/cach
 | Random Get mean | 1.791–1.908 µs | 3.391–3.524 µs |
 
 The V3 process RSS is higher in this small read run despite fewer retained index entries, because peak RSS includes block-cache payload and all other allocations. First accesses to blocks pay reading and CRC costs; they contribute to the tail. This is a measured regression in p99/mean/open/RSS for this short workload, not evidence that all workloads regress. V3 scans all records for validation during open and Scan/Compaction temporarily materialize key indexes; data set, cache, concurrency and scale materially affect results. Raw per-operation CSV and GNU time files are retained; DB fixtures remain under `/tmp/stonekv_sst_probe_20261115/` and were not deleted.
+
+This paragraph describes the measured commit `65d33c6`. Commit `0f1f028` subsequently changed range scans to stream sparse blocks; compaction still temporarily materializes key indexes. See the later workload report for its measured scan results.
